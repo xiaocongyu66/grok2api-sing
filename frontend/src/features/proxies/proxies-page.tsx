@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, CheckCircle2, Eraser, FileUp, MoreHorizontal, Pencil, Plus, Power, RefreshCw, Trash2, XCircle, Zap } from "lucide-react";
+import { Activity, CheckCircle2, Dices, Eraser, FileUp, MoreHorizontal, Pencil, Plus, Power, RefreshCw, Trash2, XCircle, Zap } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -43,7 +43,7 @@ const emptyInput: EgressNodeInput = {
   scopes: ["grok_build"],
   enabled: true,
   proxyURL: "",
-  userAgent: "random",
+  userAgent: "",
   cloudflareCookies: "",
 };
 
@@ -53,7 +53,6 @@ type BatchImportForm = {
   enabled: boolean;
   proxyText: string;
   userAgent: string;
-  randomUserAgent: boolean;
   cloudflareCookies: string;
 };
 
@@ -63,20 +62,32 @@ const emptyBatch: BatchImportForm = {
   enabled: true,
   proxyText: "",
   userAgent: "",
-  randomUserAgent: true,
   cloudflareCookies: "",
 };
 
-const RANDOM_UA = "random";
+/** Browser UA samples for the “随机” button (fill once into the input). */
+const BROWSER_UA_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:136.0) Gecko/20100101 Firefox/136.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
+];
 
-function isRandomUA(value: string | undefined): boolean {
-  const v = (value ?? "").trim().toLowerCase();
-  return v === "random" || v === "auto" || v === "randomize";
-}
-
-function resolveStoredUserAgent(random: boolean, fixed: string): string {
-  if (random) return RANDOM_UA;
-  return fixed.trim();
+function pickRandomUserAgent(current = ""): string {
+  if (BROWSER_UA_POOL.length === 0) return current;
+  if (BROWSER_UA_POOL.length === 1) return BROWSER_UA_POOL[0];
+  let next = BROWSER_UA_POOL[Math.floor(Math.random() * BROWSER_UA_POOL.length)];
+  // Avoid immediately reusing the same value when possible.
+  for (let i = 0; i < 5 && next === current; i++) {
+    next = BROWSER_UA_POOL[Math.floor(Math.random() * BROWSER_UA_POOL.length)];
+  }
+  return next;
 }
 
 const DefaultUserAgentPlaceholder = "Mozilla/5.0 … Chrome/146.0.0.0 Safari/537.36";
@@ -113,7 +124,6 @@ export function ProxiesPage() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<EgressNodeDTO | null | undefined>(undefined);
   const [form, setForm] = useState<EgressNodeInput>(emptyInput);
-  const [formRandomUA, setFormRandomUA] = useState(true);
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchForm, setBatchForm] = useState<BatchImportForm>(emptyBatch);
   const [sort, setSort] = useState<TableSort>({ field: "", order: "asc" });
@@ -153,7 +163,7 @@ export function ProxiesPage() {
         scopes,
         scope: scopes[0],
         proxyURL: form.proxyURL?.trim() || undefined,
-        userAgent: needsBrowserIdentity(scopes) ? resolveStoredUserAgent(formRandomUA, form.userAgent) : "",
+        userAgent: needsBrowserIdentity(scopes) ? form.userAgent.trim() : "",
         cloudflareCookies: needsBrowserIdentity(scopes) ? form.cloudflareCookies?.trim() || undefined : undefined,
       };
       return editing ? updateEgressNode(editing.id, input) : createEgressNode(input);
@@ -170,7 +180,7 @@ export function ProxiesPage() {
         scopes,
         enabled: batchForm.enabled,
         proxyText: batchForm.proxyText,
-        userAgent: needsBrowserIdentity(scopes) ? resolveStoredUserAgent(batchForm.randomUserAgent, batchForm.userAgent) : "",
+        userAgent: needsBrowserIdentity(scopes) ? batchForm.userAgent.trim() : "",
         cloudflareCookies: needsBrowserIdentity(scopes) ? batchForm.cloudflareCookies.trim() || undefined : undefined,
       });
     },
@@ -227,7 +237,6 @@ export function ProxiesPage() {
 
   function openCreate() {
     setForm(emptyInput);
-    setFormRandomUA(true);
     setEditing(null);
   }
 
@@ -238,14 +247,15 @@ export function ProxiesPage() {
 
   function openEdit(node: EgressNodeDTO) {
     const scopes = node.scopes?.length ? node.scopes : [node.scope];
-    const random = isRandomUA(node.userAgent);
-    setFormRandomUA(random);
+    const ua = node.userAgent?.trim() ?? "";
+    // Legacy "random" sentinel → show empty; user can click 随机 to fill a concrete UA.
+    const fixedUA = ua.toLowerCase() === "random" || ua.toLowerCase() === "auto" ? "" : ua;
     setForm({
       name: node.name,
       scope: scopes[0],
       scopes,
       enabled: node.enabled,
-      userAgent: needsBrowserIdentity(scopes) && !random ? node.userAgent : "",
+      userAgent: needsBrowserIdentity(scopes) ? fixedUA : "",
       proxyURL: "",
       cloudflareCookies: "",
     });
@@ -452,9 +462,6 @@ export function ProxiesPage() {
                           <Badge variant="secondary" className="font-mono text-[11px] uppercase tracking-wide">
                             {node.proxyProtocol || t("proxies.protocolUnknown")}
                           </Badge>
-                          {isRandomUA(node.userAgent) ? (
-                            <Badge variant="outline" className="font-normal text-[11px]">{t("proxies.randomUserAgentShort")}</Badge>
-                          ) : null}
                         </div>
                       ) : (
                         <Badge variant="outline" className="font-normal text-muted-foreground">{t("proxies.direct")}</Badge>
@@ -527,18 +534,25 @@ export function ProxiesPage() {
             </Field>
             {batchNeedsBrowser ? (
               <Field label={t("proxies.userAgent")}>
-                <div className="mb-2 flex h-9 items-center gap-2">
-                  <Switch
-                    checked={batchForm.randomUserAgent}
-                    onCheckedChange={(randomUserAgent) => setBatchForm({ ...batchForm, randomUserAgent, userAgent: randomUserAgent ? "" : batchForm.userAgent })}
+                <div className="flex gap-2">
+                  <Input
+                    className="min-w-0 flex-1 border-transparent"
+                    value={batchForm.userAgent}
+                    placeholder={listQuery.data?.defaultUserAgents.grok_web || DefaultUserAgentPlaceholder}
+                    onChange={(event) => setBatchForm({ ...batchForm, userAgent: event.target.value })}
                   />
-                  <span className="text-xs text-muted-foreground">{t("proxies.randomUserAgent")}</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    onClick={() => setBatchForm({ ...batchForm, userAgent: pickRandomUserAgent(batchForm.userAgent) })}
+                  >
+                    <Dices className="size-3.5" />
+                    {t("proxies.randomUserAgent")}
+                  </Button>
                 </div>
-                {!batchForm.randomUserAgent ? (
-                  <Input className="border-transparent" value={batchForm.userAgent} placeholder={listQuery.data?.defaultUserAgents.grok_web || DefaultUserAgentPlaceholder} onChange={(event) => setBatchForm({ ...batchForm, userAgent: event.target.value })} />
-                ) : (
-                  <p className="text-[11px] text-muted-foreground">{t("proxies.randomUserAgentHint")}</p>
-                )}
+                <p className="text-[11px] text-muted-foreground">{t("proxies.randomUserAgentHint")}</p>
               </Field>
             ) : null}
             {batchNeedsBrowser ? (
@@ -589,26 +603,25 @@ export function ProxiesPage() {
             </Field>
             {formNeedsBrowser ? (
               <Field label={t("proxies.userAgent")}>
-                <div className="mb-2 flex h-9 items-center gap-2">
-                  <Switch
-                    checked={formRandomUA}
-                    onCheckedChange={(on) => {
-                      setFormRandomUA(on);
-                      if (on) setForm({ ...form, userAgent: "" });
-                    }}
-                  />
-                  <span className="text-xs text-muted-foreground">{t("proxies.randomUserAgent")}</span>
-                </div>
-                {!formRandomUA ? (
+                <div className="flex gap-2">
                   <Input
-                    className="border-transparent"
+                    className="min-w-0 flex-1 border-transparent"
                     value={form.userAgent}
                     placeholder={listQuery.data?.defaultUserAgents.grok_web || DefaultUserAgentPlaceholder}
                     onChange={(event) => setForm({ ...form, userAgent: event.target.value })}
                   />
-                ) : (
-                  <p className="text-[11px] text-muted-foreground">{t("proxies.randomUserAgentHint")}</p>
-                )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    onClick={() => setForm({ ...form, userAgent: pickRandomUserAgent(form.userAgent) })}
+                  >
+                    <Dices className="size-3.5" />
+                    {t("proxies.randomUserAgent")}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground">{t("proxies.randomUserAgentHint")}</p>
               </Field>
             ) : null}
             {formNeedsBrowser ? (
