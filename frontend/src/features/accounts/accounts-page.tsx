@@ -566,9 +566,11 @@ export function AccountsPage() {
   const recoveringAccounts = summary?.recovering ?? 0;
   const attentionAccounts = summary?.attention ?? 0;
   const abnormalAccounts = recoveringAccounts + attentionAccounts;
-  const buildSummary = summary?.providers.grok_build ?? { total: 0, available: 0 };
-  const webSummary = summary?.providers.grok_web ?? { total: 0, available: 0 };
-  const consoleSummary = summary?.providers.grok_console ?? { total: 0, available: 0 };
+  const emptyProviderSummary = { total: 0, available: 0, reauthRequired: 0, disabled: 0 };
+  const buildSummary = summary?.providers.grok_build ?? emptyProviderSummary;
+  const webSummary = summary?.providers.grok_web ?? emptyProviderSummary;
+  const consoleSummary = summary?.providers.grok_console ?? emptyProviderSummary;
+  const providerFailedCount = summary?.providers[provider]?.reauthRequired ?? 0;
   const summaryLoading = summaryQuery.isPending;
   const summaryUnavailable = summaryQuery.isError;
   const providerAccountTotal = provider === "grok_build" ? buildSummary.total : provider === "grok_web" ? webSummary.total : consoleSummary.total;
@@ -672,9 +674,9 @@ export function AccountsPage() {
                     </Button>
                   </>
                 ) : null}
-                {hasProviderAccounts && (summary?.issues?.reauthRequired ?? 0) > 0 ? (
+                {hasProviderAccounts && providerFailedCount > 0 ? (
                   <Button variant="secondary" size="sm" className="text-destructive" onClick={() => setDeleteFailedOpen(true)}>
-                    {t("accounts.deleteFailed", { count: summary?.issues?.reauthRequired ?? 0 })}
+                    {t("accounts.deleteFailed", { count: providerFailedCount })}
                   </Button>
                 ) : null}
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
@@ -939,7 +941,7 @@ export function AccountsPage() {
       <AlertDialog open={deleteFailedOpen} onOpenChange={setDeleteFailedOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t("accounts.deleteFailedTitle", { count: summary?.issues?.reauthRequired ?? 0 })}</AlertDialogTitle>
+            <AlertDialogTitle>{t("accounts.deleteFailedTitle", { count: providerFailedCount })}</AlertDialogTitle>
             <AlertDialogDescription>{t("accounts.deleteFailedDescription")}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

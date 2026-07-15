@@ -97,12 +97,19 @@ export type AccountUpdateInput = {
   minimumRemaining: number;
 };
 
+export type AccountProviderSummaryDTO = {
+  total: number;
+  available: number;
+  reauthRequired: number;
+  disabled: number;
+};
+
 export type AccountSummaryDTO = {
   total: number;
   available: number;
   recovering: number;
   attention: number;
-  providers: Record<AccountProvider, { total: number; available: number }>;
+  providers: Record<AccountProvider, AccountProviderSummaryDTO>;
   recovery: { cooldown: number; waitingReset: number; probing: number };
   issues: { disabled: number; reauthRequired: number };
 };
@@ -159,9 +166,12 @@ const accountValidator = hasShape({
 const decodeBilling = createValidatedDecoder<BillingDTO>("billing", billingValidator);
 const decodeAccount = createValidatedDecoder<AccountDTO>("account", accountValidator);
 const decodeAccountPage = createPaginatedDecoder<AccountDTO>(accountValidator);
+const providerSummaryValidator = hasShape({
+  total: isNumber, available: isNumber, reauthRequired: isNumber, disabled: isNumber,
+});
 const decodeAccountSummary = createObjectDecoder<AccountSummaryDTO>("account summary", {
   total: isNumber, available: isNumber, recovering: isNumber, attention: isNumber,
-  providers: isRecordOf(hasShape({ total: isNumber, available: isNumber })),
+  providers: isRecordOf(providerSummaryValidator),
   recovery: hasShape({ cooldown: isNumber, waitingReset: isNumber, probing: isNumber }),
   issues: hasShape({ disabled: isNumber, reauthRequired: isNumber }),
 });

@@ -371,9 +371,18 @@ func (h *Handler) summary(c *gin.Context) {
 	response.Success(c, http.StatusOK, gin.H{
 		"total": value.Total, "available": value.Available, "recovering": value.Recovering, "attention": value.Attention,
 		"providers": gin.H{
-			string(accountdomain.ProviderBuild):   gin.H{"total": build.Total, "available": build.Available},
-			string(accountdomain.ProviderWeb):     gin.H{"total": web.Total, "available": web.Available},
-			string(accountdomain.ProviderConsole): gin.H{"total": console.Total, "available": console.Available},
+			string(accountdomain.ProviderBuild): gin.H{
+				"total": build.Total, "available": build.Available,
+				"reauthRequired": build.ReauthRequired, "disabled": build.Disabled,
+			},
+			string(accountdomain.ProviderWeb): gin.H{
+				"total": web.Total, "available": web.Available,
+				"reauthRequired": web.ReauthRequired, "disabled": web.Disabled,
+			},
+			string(accountdomain.ProviderConsole): gin.H{
+				"total": console.Total, "available": console.Available,
+				"reauthRequired": console.ReauthRequired, "disabled": console.Disabled,
+			},
 		},
 		"recovery": gin.H{"cooldown": value.Recovery.Cooldown, "waitingReset": value.Recovery.WaitingReset, "probing": value.Recovery.Probing},
 		"issues":   gin.H{"disabled": value.Issues.Disabled, "reauthRequired": value.Issues.ReauthRequired},

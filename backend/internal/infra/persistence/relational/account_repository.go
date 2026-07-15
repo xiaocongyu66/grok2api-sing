@@ -105,7 +105,8 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + `) THEN 1 ELSE 0 END) AS waiting_reset,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 1 ELSE 0 END) AS probing,
 		SUM(CASE WHEN enabled = ? THEN 1 ELSE 0 END) AS disabled,
-		SUM(CASE WHEN enabled = ? AND auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
+		SUM(CASE WHEN auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
+	// reauth_required counts every failed credential (enabled or not), matching ListFailedAccountIDs.
 	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select(
 		selectFields,
 		true, account.AuthStatusActive, now,
@@ -113,7 +114,7 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 		true, account.AuthStatusActive,
 		true, account.AuthStatusActive,
 		false,
-		true, account.AuthStatusReauthRequired,
+		account.AuthStatusReauthRequired,
 	).Group("provider").Scan(&rows).Error
 	return rows, err
 }

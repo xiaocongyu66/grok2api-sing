@@ -191,8 +191,10 @@ type Summary struct {
 }
 
 type ProviderSummary struct {
-	Total     int64
-	Available int64
+	Total          int64
+	Available      int64
+	ReauthRequired int64
+	Disabled       int64
 }
 
 type RecoverySummary struct {
@@ -223,7 +225,10 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 		result.Recovery.Probing += row.Probing
 		result.Issues.Disabled += row.Disabled
 		result.Issues.ReauthRequired += row.ReauthRequired
-		result.Providers[row.Provider] = ProviderSummary{Total: row.Total, Available: row.Available}
+		result.Providers[row.Provider] = ProviderSummary{
+			Total: row.Total, Available: row.Available,
+			ReauthRequired: row.ReauthRequired, Disabled: row.Disabled,
+		}
 	}
 	result.Recovering = result.Recovery.Cooldown + result.Recovery.WaitingReset + result.Recovery.Probing
 	result.Attention = result.Issues.Disabled + result.Issues.ReauthRequired
@@ -442,21 +447,34 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 }
 
 // DeleteFailedAccounts removes reauthRequired accounts (and optionally disabled ones) for a provider.
+// Deletes in chunks so pools larger than the batch API limit still complete.
 func (s *Service) DeleteFailedAccounts(ctx context.Context, providerValue accountdomain.Provider, includeDisabled bool) (int64, error) {
 	if !providerValue.IsValid() {
 		return 0, ErrInvalidInput
 	}
-	ids, err := s.accounts.ListFailedAccountIDs(ctx, providerValue, includeDisabled, maxCredentialExportAccounts+1)
-	if err != nil {
-		return 0, err
+	const chunk = 500
+	var deleted int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		// Fetch one batch at a time so multi-thousand failed pools do not hit the 500-ID cap.
+		ids, err := s.accounts.ListFailedAccountIDs(ctx, providerValue, includeDisabled, chunk)
+		if err != nil {
+			return deleted, err
+		}
+		if len(ids) == 0 {
+			return deleted, nil
+		}
+		n, err := s.BatchDelete(ctx, ids)
+		deleted += n
+		if err != nil {
+			return deleted, err
+		}
+		if len(ids) < chunk {
+			return deleted, nil
+		}
 	}
-	if len(ids) == 0 {
-		return 0, nil
-	}
-	if len(ids) > maxCredentialExportAccounts {
-		return 0, invalidInput("失败账号数量过多，请分批清理")
-	}
-	return s.BatchDelete(ctx, ids)
 }
 
 // DefaultPreselectValidateCount is the minimum sample size for preselected account probes.
