@@ -289,9 +289,16 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 	if value.Scope == domain.ScopeBuild {
 		userAgent = ""
 	}
+	proxyConfigured := value.EncryptedProxyURL != ""
+	protocol := ""
+	if proxyConfigured && s != nil && s.cipher != nil {
+		if plain, err := s.cipher.Decrypt(value.EncryptedProxyURL); err == nil {
+			protocol = ProxyProtocolLabel(plain)
+		}
+	}
 	node := domain.PublicNode{
 		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled,
-		ProxyConfigured: value.EncryptedProxyURL != "", UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
+		ProxyConfigured: proxyConfigured, ProxyProtocol: protocol, UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
 		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
@@ -318,6 +325,55 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 // publicNode keeps tests that call the helper without a Service instance working.
 func publicNode(value domain.Node) domain.PublicNode {
 	return (&Service{}).publicNode(value)
+}
+
+// ProxyProtocolLabel returns a short safe protocol name for admin UI (no host/user/password).
+func ProxyProtocolLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "{") {
+		return "sing-box"
+	}
+	lower := strings.ToLower(value)
+	for _, prefix := range []struct {
+		p string
+		n string
+	}{
+		{"vmess://", "vmess"},
+		{"ss://", "ss"},
+		{"ssr://", "ssr"},
+		{"vless://", "vless"},
+		{"trojan://", "trojan"},
+		{"hysteria2://", "hysteria2"},
+		{"hy2://", "hysteria2"},
+		{"hysteria://", "hysteria"},
+		{"hy://", "hysteria"},
+		{"tuic://", "tuic"},
+		{"anytls://", "anytls"},
+		{"wireguard://", "wireguard"},
+		{"wg://", "wireguard"},
+		{"shadowtls://", "shadowtls"},
+		{"ssh://", "ssh"},
+		{"socks5h://", "socks5h"},
+		{"socks5://", "socks5"},
+		{"socks4a://", "socks4a"},
+		{"socks4://", "socks4"},
+		{"https://", "https"},
+		{"http://", "http"},
+	} {
+		if strings.HasPrefix(lower, prefix.p) {
+			return prefix.n
+		}
+	}
+	if parsed, err := url.Parse(value); err == nil {
+		scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+		if scheme != "" {
+			return scheme
+		}
+	}
+	return "proxy"
 }
 
 func NormalizeProxyURL(value string) (string, error) {

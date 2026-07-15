@@ -41,6 +41,8 @@ type PublicNode struct {
 	Scope            Scope
 	Enabled          bool
 	ProxyConfigured  bool
+	// ProxyProtocol is a safe label (e.g. socks5, vmess, sing-box) without host/credentials.
+	ProxyProtocol    string
 	UserAgent        string
 	CookieConfigured bool
 	Health           float64

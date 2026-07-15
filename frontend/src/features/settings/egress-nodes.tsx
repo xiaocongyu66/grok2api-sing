@@ -84,21 +84,48 @@ export function EgressNodes() {
         <p className="text-xs text-muted-foreground">{t("console.egressDescription")}</p>
         <Button type="button" size="sm" variant="secondary" onClick={openCreate}><Plus />{t("settings.egress.add")}</Button>
       </div>
-      <div className="overflow-hidden rounded-md border">
-        <Table>
-          <TableHeader><TableRow><SortableTableHead field="name" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("settings.egress.name")}</SortableTableHead><SortableTableHead field="scope" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.scope")}</SortableTableHead><SortableTableHead field="proxy" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.proxy")}</SortableTableHead><SortableTableHead field="clearance" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.clearance")}</SortableTableHead><SortableTableHead field="health" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" align="center" onSort={changeSort}>{t("settings.egress.health")}</SortableTableHead><TableActionHead /></TableRow></TableHeader>
+      <div className="min-w-0 overflow-x-auto rounded-md border">
+        <Table className="min-w-[720px] table-fixed border-collapse text-xs">
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <SortableTableHead field="name" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("settings.egress.name")}</SortableTableHead>
+              <SortableTableHead field="scope" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.scope")}</SortableTableHead>
+              <SortableTableHead field="proxy" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.proxy")}</SortableTableHead>
+              <SortableTableHead field="clearance" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("settings.egress.clearance")}</SortableTableHead>
+              <SortableTableHead field="health" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" align="center" onSort={changeSort}>{t("settings.egress.health")}</SortableTableHead>
+              <TableActionHead />
+            </TableRow>
+          </TableHeader>
           <TableBody>
             {nodes.length === 0 ? <TableRow><TableCell colSpan={6} className="h-20 text-center text-xs text-muted-foreground">{t("settings.egress.directFallback")}</TableCell></TableRow> : nodes.map((node) => (
               <TableRow className="group" key={node.id}>
-                <TableCell><div className="text-xs font-medium">{node.name}</div>{node.lastError ? <div className="mt-0.5 max-w-72 truncate text-[11px] text-destructive">{node.lastError}</div> : null}</TableCell>
-                <TableCell className="text-center"><Badge variant="outline">{scopeLabel(node.scope)}</Badge></TableCell>
-                <TableCell className="text-center text-xs text-muted-foreground">{node.proxyConfigured ? t("settings.egress.configured") : t("settings.egress.direct")}</TableCell>
+                <TableCell className="min-w-0"><div className="truncate text-xs font-medium">{node.name}</div>{node.lastError ? <div className="mt-0.5 truncate text-[11px] text-destructive" title={node.lastError}>{node.lastError}</div> : null}</TableCell>
+                <TableCell className="text-center"><Badge variant="outline" className="max-w-full truncate">{scopeLabel(node.scope)}</Badge></TableCell>
+                <TableCell className="text-center">
+                  {node.proxyConfigured ? (
+                    <div className="flex flex-col items-center gap-0.5">
+                      <Badge variant="secondary" className="font-mono text-[11px] uppercase tracking-wide">{node.proxyProtocol || t("proxies.protocolUnknown")}</Badge>
+                      <span className="text-[11px] text-muted-foreground">{t("settings.egress.configured")}</span>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">{t("settings.egress.direct")}</span>
+                  )}
+                </TableCell>
                 <TableCell className="text-center text-xs text-muted-foreground">{node.cookieConfigured ? t("settings.egress.configured") : t("settings.egress.none")}</TableCell>
                 <TableCell className="text-center text-xs tabular-nums">{Math.round(node.health * 100)}%</TableCell>
                 <TableActionCell>
-                  <DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("common.actions")}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => openEdit(node)}><Pencil />{t("common.edit")}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => remove.mutate(node.id)}><Trash2 />{t("common.delete")}</DropdownMenuItem>
-                  </DropdownMenuContent></DropdownMenu>
+                  <DropdownMenu modal={false}>
+                    <DropdownMenuTrigger asChild>
+                      <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0 touch-manipulation" aria-label={t("common.actions")}>
+                        <MoreHorizontal />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" side="bottom" sideOffset={6} collisionPadding={12} className="z-[80] min-w-36">
+                      <DropdownMenuItem onClick={() => openEdit(node)}><Pencil />{t("common.edit")}</DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => remove.mutate(node.id)}><Trash2 />{t("common.delete")}</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </TableActionCell>
               </TableRow>
             ))}
@@ -107,7 +134,7 @@ export function EgressNodes() {
       </div>
 
       <Dialog open={editing !== undefined} onOpenChange={(open) => { if (!open) setEditing(undefined); }}>
-        <DialogContent>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{editing ? t("settings.egress.editTitle") : t("settings.egress.addTitle")}</DialogTitle><DialogDescription>{t("console.egressDialogDescription")}</DialogDescription></DialogHeader>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label={t("settings.egress.name")} className="sm:col-span-2"><Input className="border-transparent" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>

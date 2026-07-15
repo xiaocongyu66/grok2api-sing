@@ -48,6 +48,29 @@ func TestNormalizeProxyURLValidatesStructure(t *testing.T) {
 	}
 }
 
+func TestProxyProtocolLabel(t *testing.T) {
+	if got := ProxyProtocolLabel(""); got != "" {
+		t.Fatalf("empty label = %q", got)
+	}
+	cases := map[string]string{
+		"socks5h://user:pass@1.2.3.4:1080":                                  "socks5h",
+		"vmess://eyJhZGQiOiIxLjIuMy40In0=":                                   "vmess",
+		"ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@1.2.3.4:8388":                      "ss",
+		"hy2://secret@1.2.3.4:443":                                           "hysteria2",
+		`{"type":"socks","tag":"p","server":"127.0.0.1","server_port":1080}`: "sing-box",
+	}
+	for raw, want := range cases {
+		got := ProxyProtocolLabel(raw)
+		if got != want {
+			t.Fatalf("ProxyProtocolLabel(%q) = %q, want %q", raw, got, want)
+		}
+		// Labels must never embed credentials or host from classic URLs.
+		if strings.Contains(got, "user") || strings.Contains(got, "pass") || strings.Contains(got, "1.2.3.4") {
+			t.Fatalf("label leaked secret material: %q from %q", got, raw)
+		}
+	}
+}
+
 func TestServiceRejectsRemovedAllScope(t *testing.T) {
 	service := &Service{}
 	_, err := service.applyInput(domain.Node{}, Input{Name: "legacy", Scope: domain.Scope("all"), Enabled: true}, true)

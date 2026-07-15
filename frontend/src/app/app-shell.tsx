@@ -247,7 +247,7 @@ export function AppShell() {
             </Button>
           </header>
 
-          <main className="mx-auto w-full max-w-[1280px] flex-1 px-5 py-8 sm:px-8 lg:py-20">
+          <main className="mx-auto w-full min-w-0 max-w-[1280px] flex-1 px-4 py-6 sm:px-8 sm:py-8 lg:py-20">
             <Outlet />
           </main>
           <SiteFooter />

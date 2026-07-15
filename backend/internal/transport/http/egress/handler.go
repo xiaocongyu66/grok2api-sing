@@ -44,6 +44,7 @@ type nodeResponse struct {
 	Scope            string     `json:"scope"`
 	Enabled          bool       `json:"enabled"`
 	ProxyConfigured  bool       `json:"proxyConfigured"`
+	ProxyProtocol    string     `json:"proxyProtocol,omitempty"`
 	UserAgent        string     `json:"userAgent"`
 	CookieConfigured bool       `json:"cookieConfigured"`
 	Health           float64    `json:"health"`
@@ -207,7 +208,7 @@ func (h *Handler) update(c *gin.Context) {
 func newNodeResponse(value egressdomain.PublicNode) nodeResponse {
 	return nodeResponse{
 		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
-		ProxyConfigured: value.ProxyConfigured, UserAgent: value.UserAgent, CookieConfigured: value.CookieConfigured,
+		ProxyConfigured: value.ProxyConfigured, ProxyProtocol: value.ProxyProtocol, UserAgent: value.UserAgent, CookieConfigured: value.CookieConfigured,
 		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		SuccessCount: value.SuccessCount, RequestCount: value.RequestCount, SuccessRate: value.SuccessRate, FailureRate: value.FailureRate,
 		Inflight: value.Inflight, LastProbeAt: value.LastProbeAt, LastProbeOK: value.LastProbeOK, LastProbeMs: value.LastProbeMs,

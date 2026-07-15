@@ -193,10 +193,20 @@ export function ProxiesPage() {
         />
       </div>
 
-      <div className="overflow-hidden rounded-md border">
-        <Table>
+      <div className="min-w-0 overflow-x-auto rounded-md border">
+        <Table className="min-w-[920px] table-fixed border-collapse text-xs">
+          <colgroup>
+            <col className="w-[22%]" />
+            <col className="w-[12%]" />
+            <col className="w-[14%]" />
+            <col className="w-[10%]" />
+            <col className="w-[10%]" />
+            <col className="w-[10%]" />
+            <col className="w-[12%]" />
+            <col className="w-12" />
+          </colgroup>
           <TableHeader>
-            <TableRow>
+            <TableRow className="hover:bg-transparent">
               <SortableTableHead field="name" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("proxies.name")}</SortableTableHead>
               <SortableTableHead field="scope" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("proxies.scope")}</SortableTableHead>
               <SortableTableHead field="proxy" sortBy={sort.field} sortOrder={sort.order} align="center" onSort={changeSort}>{t("proxies.proxy")}</SortableTableHead>
@@ -223,23 +233,32 @@ export function ProxiesPage() {
             ) : (
               nodes.map((node) => (
                 <TableRow className="group" key={node.id}>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      <div className="text-xs font-medium">{node.name}</div>
-                      {!node.enabled ? <Badge variant="outline">{t("common.disabled")}</Badge> : null}
+                  <TableCell className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <div className="truncate text-xs font-medium">{node.name}</div>
+                      {!node.enabled ? <Badge variant="outline" className="shrink-0">{t("common.disabled")}</Badge> : null}
                     </div>
-                    {node.lastError ? <div className="mt-0.5 max-w-72 truncate text-[11px] text-destructive">{node.lastError}</div> : null}
+                    {node.lastError ? <div className="mt-0.5 truncate text-[11px] text-destructive" title={node.lastError}>{node.lastError}</div> : null}
                     {node.lastProbeAt ? (
-                      <div className="mt-0.5 text-[11px] text-muted-foreground">
+                      <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
                         {node.lastProbeOK
                           ? t("proxies.lastProbeOk", { ms: node.lastProbeMs ?? 0, time: formatDateTime(node.lastProbeAt, i18n.language) })
                           : t("proxies.lastProbeFail", { error: node.lastProbeError || "failed", time: formatDateTime(node.lastProbeAt, i18n.language) })}
                       </div>
                     ) : null}
                   </TableCell>
-                  <TableCell className="text-center"><Badge variant="outline">{scopeLabel(node.scope)}</Badge></TableCell>
-                  <TableCell className="text-center text-xs text-muted-foreground">
-                    {node.proxyConfigured ? t("proxies.configured") : t("proxies.direct")}
+                  <TableCell className="text-center"><Badge variant="outline" className="max-w-full truncate">{scopeLabel(node.scope)}</Badge></TableCell>
+                  <TableCell className="text-center">
+                    {node.proxyConfigured ? (
+                      <div className="flex flex-col items-center gap-0.5">
+                        <Badge variant="secondary" className="font-mono text-[11px] uppercase tracking-wide">
+                          {node.proxyProtocol || t("proxies.protocolUnknown")}
+                        </Badge>
+                        <span className="text-[11px] text-muted-foreground">{t("proxies.configured")}</span>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">{t("proxies.direct")}</span>
+                    )}
                   </TableCell>
                   <TableCell className="text-center text-xs tabular-nums">{Math.round(node.health * 100)}%</TableCell>
                   <TableCell className="text-center text-xs tabular-nums text-emerald-600 dark:text-emerald-400">
@@ -253,13 +272,13 @@ export function ProxiesPage() {
                     {node.inflight > 0 ? <span className="ml-1 text-muted-foreground">· {node.inflight}</span> : null}
                   </TableCell>
                   <TableActionCell>
-                    <DropdownMenu>
+                    <DropdownMenu modal={false}>
                       <DropdownMenuTrigger asChild>
-                        <Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("common.actions")}>
+                        <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0 touch-manipulation" aria-label={t("common.actions")}>
                           <MoreHorizontal />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
+                      <DropdownMenuContent align="end" side="bottom" sideOffset={6} collisionPadding={12} className="z-[80] min-w-36">
                         <DropdownMenuItem disabled={testingId === node.id || testOne.isPending} onClick={() => testOne.mutate(node.id)}>
                           {testingId === node.id ? <Spinner className="size-3.5" /> : <Zap />}
                           {t("proxies.test")}
@@ -280,7 +299,7 @@ export function ProxiesPage() {
       </div>
 
       <Dialog open={editing !== undefined} onOpenChange={(open) => { if (!open) setEditing(undefined); }}>
-        <DialogContent>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editing ? t("proxies.editTitle") : t("proxies.addTitle")}</DialogTitle>
             <DialogDescription>{t("proxies.dialogDescription")}</DialogDescription>

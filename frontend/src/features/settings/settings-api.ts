@@ -33,7 +33,7 @@ export type SettingsConfigDTO = {
 
 export type EgressNodeDTO = {
   id: string; name: string; scope: EgressScope; enabled: boolean;
-  proxyConfigured: boolean; userAgent: string; cookieConfigured: boolean;
+  proxyConfigured: boolean; proxyProtocol?: string; userAgent: string; cookieConfigured: boolean;
   health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
   successCount: number; requestCount: number; successRate: number; failureRate: number;
   inflight: number; lastProbeAt?: string; lastProbeOK?: boolean; lastProbeMs?: number; lastProbeError?: string;
@@ -101,14 +101,14 @@ const decodeSettingsSnapshot = createObjectDecoder<SettingsSnapshotDTO>("setting
 const egressScopeValidator = isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset");
 const egressNodeValidator = hasShape({
   id: isString, name: isString, scope: egressScopeValidator, enabled: isBoolean,
-  proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
+  proxyConfigured: isBoolean, proxyProtocol: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
   successCount: isNumber, requestCount: isNumber, successRate: isNumber, failureRate: isNumber, inflight: isNumber,
   lastProbeAt: isOptional(isString), lastProbeOK: isOptional(isBoolean), lastProbeMs: isOptional(isNumber), lastProbeError: isOptional(isString),
 });
 const decodeEgressNode = createObjectDecoder<EgressNodeDTO>("egress node", {
   id: isString, name: isString, scope: egressScopeValidator, enabled: isBoolean,
-  proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
+  proxyConfigured: isBoolean, proxyProtocol: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
   successCount: isNumber, requestCount: isNumber, successRate: isNumber, failureRate: isNumber, inflight: isNumber,
   lastProbeAt: isOptional(isString), lastProbeOK: isOptional(isBoolean), lastProbeMs: isOptional(isNumber), lastProbeError: isOptional(isString),
