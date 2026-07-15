@@ -111,6 +111,7 @@ require (
 	github.com/sagernet/sing-shadowtls v0.2.1-0.20250503051639-fcd445d33c11 // indirect
 	github.com/sagernet/sing-vmess v0.2.7 // indirect
 	github.com/sagernet/smux v1.5.34-mod.2 // indirect
+	github.com/sagernet/wireguard-go v0.0.1-beta.7 // indirect
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
