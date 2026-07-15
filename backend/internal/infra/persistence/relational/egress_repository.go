@@ -2,6 +2,7 @@ package relational
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -49,6 +50,9 @@ func (r *EgressRepository) GetEgressNode(ctx context.Context, id uint64) (egress
 }
 
 func (r *EgressRepository) CreateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error) {
+	if err := validateEgressNodeScopes(value); err != nil {
+		return egress.Node{}, err
+	}
 	row := fromEgressDomain(value)
 	if err := r.db.db.WithContext(ctx).Create(&row).Error; err != nil {
 		return egress.Node{}, mapError(err)
@@ -57,6 +61,9 @@ func (r *EgressRepository) CreateEgressNode(ctx context.Context, value egress.No
 }
 
 func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error) {
+	if err := validateEgressNodeScopes(value); err != nil {
+		return egress.Node{}, err
+	}
 	row := fromEgressDomain(value)
 	result := r.db.db.WithContext(ctx).Save(&row)
 	if result.Error != nil {
@@ -66,6 +73,30 @@ func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.No
 		return egress.Node{}, repository.ErrNotFound
 	}
 	return toEgressDomain(row), nil
+}
+
+func validateEgressNodeScopes(value egress.Node) error {
+	// Reject legacy "all" and any other non-provider scope at the repository boundary.
+	// Multi-scope is stored as comma-separated values; each segment must be valid.
+	scopes := value.EffectiveScopes()
+	if len(scopes) == 0 {
+		// Also catch raw Scope="all" when Scopes is empty and Scope is not a valid enum.
+		raw := strings.TrimSpace(string(value.Scope))
+		if raw == "" {
+			return fmt.Errorf("egress scope is required")
+		}
+		if parsed := parseStoredScopes(raw); len(parsed) > 0 {
+			scopes = parsed
+		} else {
+			return fmt.Errorf("invalid egress scope %q", raw)
+		}
+	}
+	for _, scope := range scopes {
+		if !scope.IsValid() {
+			return fmt.Errorf("invalid egress scope %q", scope)
+		}
+	}
+	return nil
 }
 
 func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) error {

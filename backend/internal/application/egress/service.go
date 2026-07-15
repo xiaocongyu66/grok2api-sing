@@ -404,8 +404,26 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		value.UserAgent = ""
 		value.EncryptedCloudflareCookie = ""
 	} else {
-		// empty = default at request time; "random"/"auto" = rotate pool per lease; else fixed UA.
+		// empty on create → provider default for UI; empty on update keeps existing unless cleared.
+		// "random"/"auto" → rotate pool per lease at runtime.
 		ua := normalizeStoredUserAgent(input.UserAgent)
+		if ua == "" {
+			if create {
+				s.mu.RLock()
+				uaScope := primary
+				for _, scope := range scopes {
+					if scope != domain.ScopeBuild {
+						uaScope = scope
+						break
+					}
+				}
+				ua = s.defaultUserAgent(uaScope)
+				s.mu.RUnlock()
+			} else {
+				// Keep existing value on update when the field is omitted/blank.
+				ua = value.UserAgent
+			}
+		}
 		value.UserAgent = ua
 	}
 	if len(value.UserAgent) > 512 {
