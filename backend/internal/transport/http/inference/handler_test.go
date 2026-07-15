@@ -325,6 +325,36 @@ func TestExtractUsageFromAnthropicAndChatCacheFields(t *testing.T) {
 	}
 }
 
+func TestResolvePromptCacheKeyPriority(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("x-grok-conv-id", "from-header")
+	c.Request = req
+
+	if got := resolvePromptCacheKey(c, "from-body", "user", "meta"); got != "from-body" {
+		t.Fatalf("explicit body key = %q", got)
+	}
+	if got := resolvePromptCacheKey(c, "", "user-a", ""); got != "user-a" {
+		t.Fatalf("user field = %q", got)
+	}
+	if got := resolvePromptCacheKey(c, "", "", "meta-user"); got != "meta-user" {
+		t.Fatalf("metadata user = %q", got)
+	}
+	if got := resolvePromptCacheKey(c, "", "", ""); got != "from-header" {
+		t.Fatalf("header key = %q", got)
+	}
+}
+
+func TestUsageInspectorKeepsCachedTokensFromCompletedEvent(t *testing.T) {
+	inspector := &responseInspector{}
+	inspector.Inspect([]byte(`data: {"type":"response.completed","response":{"id":"resp_c","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":80},"output_tokens":10,"total_tokens":110}}}` + "\n"))
+	usage := inspector.Metadata().Usage
+	if usage.CachedInputTokens != 80 || usage.InputTokens != 100 || usage.OutputTokens != 10 {
+		t.Fatalf("stream usage = %#v", usage)
+	}
+}
+
 func TestUsageInspectorHandlesChunkedSSE(t *testing.T) {
 	inspector := &responseInspector{}
 	inspector.Inspect([]byte("data: {\"response\":{\"id\":\"resp_stream\",\"usage\":{\"input_tokens\":2,"))

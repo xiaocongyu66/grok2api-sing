@@ -133,7 +133,17 @@ Messages 转换层兼容 Claude Code 常见载荷：标准顶层 `system` 与误
 
 Grok Web 未提供与公开 API 等价的精确 Token 计量，因此聊天审计标记 `usageSource: estimated`；图片和视频标记 `usageSource: none`，不会伪造 Token，用量费用仅按已配置的官方媒体单价估算。Web 不会伪造 `cached_tokens` / `cache_read_input_tokens`（固定为 0）：Grok Web 上游没有官方 prompt-cache 计量。
 
-Grok Build / Console 原样透传上游 usage 中的 `input_tokens_details.cached_tokens`（及协议映射字段），并用客户端 `prompt_cache_key` 做账号粘滞，以便命中**上游真实** prompt cache；网关不发明缓存命中数。
+Grok Build / Console 原样透传上游 usage 中的 `input_tokens_details.cached_tokens`（Chat 映射为 `prompt_tokens_details.cached_tokens`，Messages 映射为 `cache_read_input_tokens`）。**没有「缓存输出」字段**：xAI 只对 prompt/input 前缀做 cache，输出 token 始终全价计量。
+
+要看到非 0 的真实 `cached_tokens`，客户端必须提供**稳定**的会话亲和键，否则 Build 适配器会为每次请求生成随机 `x-grok-conv-id`，上游 cache 无法命中：
+
+| 协议 | 推荐传法 |
+|------|----------|
+| Responses | body `prompt_cache_key`，或 Header `x-grok-conv-id` |
+| Chat Completions | Header `x-grok-conv-id`，或 body `prompt_cache_key` / `user` / `metadata.user_id` |
+| Messages | Header `x-grok-conv-id`，或 body `metadata.user_id` |
+
+同一会话请固定同一键、只追加消息、不要改历史前缀；首轮命中通常为 0，第二轮起才可能增长。网关用该键做账号粘滞与上游路由，**不伪造** cache 数值。
 
 Grok Web 付费账号使用 `GrokBuildBilling/GetGrokCreditsConfig` 返回的统一周额度池：保存真实使用百分比、产品枚举分解、周期起止和重置时间，并作为 Chat、Imagine、图片编辑和视频共享的路由总闸门。成功调用后异步刷新周池，不按未知权重进行本地伪扣减；耗尽后按真实周重置时间进入单次恢复队列。
 

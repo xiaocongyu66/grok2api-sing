@@ -65,11 +65,21 @@ type responsesRequest struct {
 	Stream             bool   `json:"stream"`
 	PromptCacheKey     string `json:"prompt_cache_key"`
 	PreviousResponseID string `json:"previous_response_id"`
+	User               string `json:"user"`
+	Metadata           *struct {
+		UserID string `json:"user_id"`
+	} `json:"metadata"`
 }
 
 type chatCompletionRequest struct {
-	Model  string `json:"model"`
-	Stream bool   `json:"stream"`
+	Model          string `json:"model"`
+	Stream         bool   `json:"stream"`
+	PromptCacheKey string `json:"prompt_cache_key"`
+	User           string `json:"user"`
+	// OpenAI-compatible metadata; user_id is used as a stable prompt-cache affinity key.
+	Metadata *struct {
+		UserID string `json:"user_id"`
+	} `json:"metadata"`
 }
 
 type messagesRequest struct {
@@ -77,6 +87,9 @@ type messagesRequest struct {
 	MaxTokens *int            `json:"max_tokens"`
 	Messages  json.RawMessage `json:"messages"`
 	Stream    bool            `json:"stream"`
+	Metadata  *struct {
+		UserID string `json:"user_id"`
+	} `json:"metadata"`
 }
 
 type imageGenerationRequest struct {
@@ -188,9 +201,16 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+	// xAI prompt cache needs a stable affinity id (x-grok-conv-id). Without it the
+	// Build adapter invents a random id per request and cached_tokens stays 0.
+	metadataUserID := ""
+	if request.Metadata != nil {
+		metadataUserID = request.Metadata.UserID
+	}
+	promptCacheKey := resolvePromptCacheKey(c, request.PromptCacheKey, request.User, metadataUserID)
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream,
+		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -227,15 +247,40 @@ func (h *Handler) createMessage(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+	metadataUserID := ""
+	if request.Metadata != nil {
+		metadataUserID = request.Metadata.UserID
+	}
+	promptCacheKey := resolvePromptCacheKey(c, "", "", metadataUserID)
 	result, err := h.gateway.CreateMessage(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream,
+		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
 		return
 	}
 	h.writeResult(c, result, request.Stream)
+}
+
+// resolvePromptCacheKey picks a stable conversation affinity key for xAI prompt caching.
+// Priority: explicit body fields → x-grok-conv-id style headers. Empty means the Build
+// adapter will generate a one-off id (cache miss by design).
+func resolvePromptCacheKey(c *gin.Context, explicit, user, metadataUserID string) string {
+	for _, candidate := range []string{
+		explicit,
+		user,
+		metadataUserID,
+		c.GetHeader("x-grok-conv-id"),
+		c.GetHeader("X-Grok-Conv-Id"),
+		c.GetHeader("x-grok-conversation-id"),
+		c.GetHeader("X-Grok-Conversation-Id"),
+	} {
+		if value := strings.TrimSpace(candidate); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (h *Handler) generateImage(c *gin.Context) {
@@ -652,7 +697,12 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
-	input := gateway.Input{RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model, Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey, PreviousResponseID: request.PreviousResponseID}
+	metadataUserID := ""
+	if request.Metadata != nil {
+		metadataUserID = request.Metadata.UserID
+	}
+	promptCacheKey := resolvePromptCacheKey(c, request.PromptCacheKey, request.User, metadataUserID)
+	input := gateway.Input{RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model, Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey, PreviousResponseID: request.PreviousResponseID}
 	var result *gateway.Result
 	if compact {
 		result, err = h.gateway.CompactResponse(c.Request.Context(), input)
@@ -857,7 +907,9 @@ func (i *responseInspector) Inspect(chunk []byte) {
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if !bytes.Equal(value, []byte("[DONE]")) {
 				metadata := extractMetadata(value)
-				if metadata.Usage.TotalTokens > 0 {
+				// Accept any non-empty usage (including cached-only updates); previously
+				// TotalTokens>0 skipped events that only carried partial usage details.
+				if metadata.Usage.TotalTokens > 0 || metadata.Usage.InputTokens > 0 || metadata.Usage.OutputTokens > 0 || metadata.Usage.CachedInputTokens > 0 {
 					if metadata.Usage.ResponseModel == "" {
 						metadata.Usage.ResponseModel = i.metadata.Model
 					}
