@@ -31,6 +31,7 @@ var schemaModels = []any{
 	&mediaJobModel{},
 	&mediaAssetModel{},
 	&runtimeSettingsModel{},
+	&promptCacheAffinityModel{},
 	&egressNodeModel{},
 }
 
@@ -70,6 +71,7 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_recovery ON media_jobs(status, lease_until, created_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_usage_recovery ON media_jobs(status, usage_recorded_at, completed_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC, id)",
+	"CREATE INDEX IF NOT EXISTS idx_prompt_cache_affinity_expires ON prompt_cache_affinity(expires_at)",
 }
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。

@@ -61,6 +61,7 @@ type Application struct {
 	providers     *provider.Registry
 	web           *webprovider.Adapter
 	startup       *startupState
+	affinitySQL   *relational.AffinityStore
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
@@ -236,11 +237,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressService.SetRuntime(egressManager)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	// new-api style Redis token cache: multi-instance shared API key auth objects.
-	var affinityStore promptcache.Store = memory.NewAffinityStore()
+	// Affinity: SQL is durable source of truth; Redis/memory is a hot cache layer.
+	sqlAffinity := relational.NewAffinityStore(database)
+	var affinityCache promptcache.Cache = memory.NewAffinityStore()
 	if redisStore, ok := runtimeStore.(*redisruntime.Store); ok {
 		clientKeyService.SetTokenCache(redisruntime.NewTokenCache(redisStore))
-		affinityStore = redisruntime.NewAffinityStore(redisStore)
+		affinityCache = redisruntime.NewAffinityStore(redisStore)
 	}
+	affinityStore := promptcache.NewLayeredStore(sqlAffinity, affinityCache)
 	promptCacheAffinity := promptcache.NewResolver(affinityStore, promptcache.Policy{
 		Enabled: cfg.Routing.PromptCacheAffinity.Enabled, Fingerprint: cfg.Routing.PromptCacheAffinity.Fingerprint,
 		Expire: cfg.Routing.PromptCacheAffinity.Expire, TTL: cfg.Routing.PromptCacheAffinity.TTL.Value(),
@@ -308,6 +312,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		audits: auditService, responses: responseRepo, runtime: runtimeStore,
 		settingsBus: settingsBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService,
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, startup: startup,
+		affinitySQL: sqlAffinity,
 	}, nil
 }
 
@@ -393,6 +398,16 @@ func (a *Application) Run(ctx context.Context) error {
 	startBackground("response_ownership_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 24*time.Hour, "response_ownership_cleanup", func(runCtx context.Context) error {
 			_, err := a.responses.DeleteExpired(runCtx, time.Now().UTC())
+			return err
+		})
+		return nil
+	})
+	startBackground("prompt_cache_affinity_cleanup", func(taskCtx context.Context) error {
+		a.runPeriodicTask(taskCtx, time.Hour, "prompt_cache_affinity_cleanup", func(runCtx context.Context) error {
+			if a.affinitySQL == nil {
+				return nil
+			}
+			_, err := a.affinitySQL.DeleteExpired(runCtx, time.Now().UTC())
 			return err
 		})
 		return nil

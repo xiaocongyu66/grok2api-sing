@@ -113,7 +113,8 @@ routing:
   # [通常不要修改] true 时所有 5xx 都会触发换号。
   retryServerErrors: true
   # Prompt 缓存亲和：稳定 x-grok-conv-id，提高上游真实 cached_tokens 命中（不伪造 token）。
-  # 优先 Claude Code / Codex / Grok CLI 会话头；否则可按 API Key+IP+UA 指纹映射并写入 Redis。
+  # 优先 Claude Code / Codex / Grok CLI 会话头；否则按 API Key+IP+UA 指纹映射。
+  # 映射写入 SQL（prompt_cache_affinity）持久化，Redis/memory 作热缓存。
   promptCacheAffinity:
     enabled: true
     fingerprint: true

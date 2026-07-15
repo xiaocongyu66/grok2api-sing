@@ -4,7 +4,7 @@
 // Priority (first non-empty wins):
 //  1. Explicit client session headers (Claude Code / Codex / Grok CLI style)
 //  2. Request body fields (prompt_cache_key, user, metadata.user_id)
-//  3. Fingerprint of client key + IP + User-Agent → persistent mapping (Redis/memory)
+//  3. Fingerprint of client key + IP + User-Agent → persistent mapping (SQL + Redis/memory cache)
 //
 // The resolved value is forwarded as x-grok-conv-id / prompt_cache_key affinity.
 // This does NOT invent cached_tokens; it only stabilizes routing so the upstream

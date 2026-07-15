@@ -139,7 +139,10 @@ Grok Build / Console 原样透传上游 usage 中的 `input_tokens_details.cache
 
 1. 客户端会话头（Claude Code / Codex / Grok CLI 风格）：`x-claude-code-session-id`、`session-id`、`x-session-id`、`x-codex-window-id`、`x-codex-session-id`、`x-grok-conv-id` 等  
 2. Body：`prompt_cache_key` / `user` / `metadata.user_id`  
-3. 若开启 `routing.promptCacheAffinity`：按 **API Key + 客户端 IP + User-Agent** 指纹在 Redis/memory 中映射到固定 `xai_…` id（可配置是否过期与 TTL）
+3. 若开启 `routing.promptCacheAffinity`：按 **API Key + 客户端 IP + User-Agent** 指纹映射到固定 `xai_…` id  
+   - **SQL** 表 `prompt_cache_affinity` 为持久化真源（重启/换机可恢复）  
+   - **Redis**（或无 Redis 时的 memory）为热缓存层  
+   - 可配置是否过期与 TTL；过期行由后台任务清理
 
 | 协议 | 推荐传法 |
 |------|----------|

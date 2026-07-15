@@ -369,6 +369,18 @@ type runtimeSettingsModel struct {
 
 func (runtimeSettingsModel) TableName() string { return "runtime_settings" }
 
+// promptCacheAffinityModel persists fingerprint → xAI affinity id across restarts.
+// Redis/memory may cache the same mapping; SQL is the durable source of truth.
+type promptCacheAffinityModel struct {
+	Fingerprint string     `gorm:"size:64;primaryKey;check:chk_prompt_cache_affinity_fp,length(fingerprint) = 64"`
+	AffinityID  string     `gorm:"size:80;not null;check:chk_prompt_cache_affinity_id,length(trim(affinity_id)) BETWEEN 1 AND 80"`
+	ExpiresAt   *time.Time // nil = never expire
+	CreatedAt   time.Time  `gorm:"not null"`
+	UpdatedAt   time.Time  `gorm:"not null"`
+}
+
+func (promptCacheAffinityModel) TableName() string { return "prompt_cache_affinity" }
+
 type egressNodeModel struct {
 	ID   uint64 `gorm:"primaryKey;autoIncrement"`
 	Name string `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
