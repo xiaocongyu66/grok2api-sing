@@ -82,13 +82,12 @@ type parsedChat struct {
 	cardCache      map[string]map[string]any
 	citationIndex  map[string]int
 	lastCitation   int
-	ServerTools        int64
-	InputTokens        int64
-	CachedInputTokens  int64 // estimated prompt-cache hits (prior conversation context)
-	ToolCalls          []parsedToolCall
-	Tools              []any
-	ToolChoice         any
-	ParallelTools      bool
+	ServerTools   int64
+	InputTokens   int64
+	ToolCalls     []parsedToolCall
+	Tools         []any
+	ToolChoice    any
+	ParallelTools bool
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
@@ -211,10 +210,10 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		parsed = currentParsed
 		break
 	}
-	// Web app-chat does not return official usage. Estimate input/output tokens and,
-	// when previous_response_id continues a server-side conversation, treat prior
-	// context as prompt-cache hits (cached_tokens / cache_read_input_tokens).
-	parsed.InputTokens, parsed.CachedInputTokens = estimatePromptCacheTokens(normalized.Prompt, previous)
+	// Web has no official usage or prompt-cache meters. Only estimate input/output text
+	// tokens; cached_tokens stay 0 (never invent cache hits).
+	_ = previous
+	parsed.InputTokens = estimateTokens(normalized.Prompt)
 	parsed.Tools = tools.ResponseTools
 	parsed.ToolChoice = tools.ResponseChoice
 	parsed.ParallelTools = parallelTools
@@ -360,10 +359,9 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 	go func() {
 		defer source.Close()
 		defer lease.Release()
-		inputTokens, cachedTokens := estimatePromptCacheTokens(prompt, previous)
 		parsed := &parsedChat{
-			ResponseID: responseID, InputTokens: inputTokens, CachedInputTokens: cachedTokens,
-			Tools: tools.ResponseTools, ToolChoice: tools.ResponseChoice, ParallelTools: parallelTools,
+			ResponseID: responseID, InputTokens: estimateTokens(prompt), Tools: tools.ResponseTools,
+			ToolChoice: tools.ResponseChoice, ParallelTools: parallelTools,
 		}
 		if previous != nil {
 			parsed.ConversationID = previous.ConversationID
@@ -1149,13 +1147,6 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		options = responseOptions[0]
 	}
 	inputTokens := parsed.InputTokens
-	cachedTokens := parsed.CachedInputTokens
-	if cachedTokens < 0 {
-		cachedTokens = 0
-	}
-	if cachedTokens > inputTokens {
-		cachedTokens = inputTokens
-	}
 	outputTokens := estimateTokens(parsed.Text.String()) + estimateTokens(parsed.Reasoning.String()) + estimateToolCallTokens(parsed.ToolCalls)
 	if operation == "chat" {
 		message := map[string]any{"role": "assistant", "content": parsed.Text.String(), "reasoning_content": parsed.Reasoning.String()}
@@ -1173,10 +1164,8 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		value := map[string]any{
 			"id": strings.Replace(responseID, "resp_", "chatcmpl_", 1), "object": "chat.completion", "created": created, "model": model,
 			"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason}},
-			"usage": map[string]any{
-				"prompt_tokens": inputTokens, "completion_tokens": outputTokens, "total_tokens": inputTokens + outputTokens,
-				"prompt_tokens_details": map[string]any{"cached_tokens": cachedTokens},
-			},
+			// No real prompt-cache meter on Web: omit fake cached_tokens.
+			"usage": map[string]any{"prompt_tokens": inputTokens, "completion_tokens": outputTokens, "total_tokens": inputTokens + outputTokens},
 		}
 		if len(parsed.SearchSources) > 0 {
 			value["search_sources"] = parsed.SearchSources
@@ -1208,11 +1197,7 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		return map[string]any{
 			"id": strings.Replace(responseID, "resp_", "msg_", 1), "type": "message", "role": "assistant", "model": model,
 			"content": content, "stop_reason": stopReason, "stop_sequence": nullableWebString(stopSequence),
-			// Anthropic-compatible: cache_read ≈ prior conversation held server-side via previous_response_id.
-			"usage": map[string]any{
-				"input_tokens": inputTokens, "output_tokens": outputTokens,
-				"cache_creation_input_tokens": 0, "cache_read_input_tokens": cachedTokens,
-			},
+			"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
 		}
 	}
 	output := make([]any, 0, 2)
@@ -1249,71 +1234,11 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		"output": output, "parallel_tool_calls": parsed.ParallelTools, "tools": tools, "tool_choice": toolChoice, "store": true,
 		"usage": map[string]any{
 			"input_tokens": inputTokens, "output_tokens": outputTokens, "total_tokens": inputTokens + outputTokens,
-			"input_tokens_details":  map[string]any{"cached_tokens": cachedTokens},
+			// Real prompt-cache only comes from Build/Console upstream; Web reports 0.
+			"input_tokens_details":  map[string]any{"cached_tokens": 0},
 			"output_tokens_details": map[string]any{"reasoning_tokens": estimateTokens(parsed.Reasoning.String())},
 			"num_sources_used":      int64(len(parsed.SearchSources)), "num_server_side_tools_used": parsed.ServerTools,
 		},
-	}
-}
-
-// estimatePromptCacheTokens returns total input tokens and the subset treated as
-// prompt-cache hits. Grok Web does not publish official usage; when the client
-// continues with previous_response_id the upstream already holds conversation
-// state, so prior input+output tokens are reported as cached_tokens.
-func estimatePromptCacheTokens(prompt string, previous *inferencedomain.WebResponseState) (inputTokens, cachedTokens int64) {
-	current := estimateTokens(prompt)
-	if previous == nil {
-		return current, 0
-	}
-	cachedTokens = priorConversationTokens(previous)
-	if cachedTokens <= 0 {
-		return current, 0
-	}
-	return cachedTokens + current, cachedTokens
-}
-
-func priorConversationTokens(previous *inferencedomain.WebResponseState) int64 {
-	if previous == nil || strings.TrimSpace(previous.ResponseJSON) == "" {
-		return 0
-	}
-	var payload map[string]any
-	if json.Unmarshal([]byte(previous.ResponseJSON), &payload) != nil {
-		return 0
-	}
-	usage, _ := payload["usage"].(map[string]any)
-	if usage == nil {
-		if nested, ok := payload["response"].(map[string]any); ok {
-			usage, _ = nested["usage"].(map[string]any)
-		}
-	}
-	if usage == nil {
-		return 0
-	}
-	input := jsonInt64(usage["input_tokens"])
-	if input == 0 {
-		input = jsonInt64(usage["prompt_tokens"])
-	}
-	output := jsonInt64(usage["output_tokens"])
-	if output == 0 {
-		output = jsonInt64(usage["completion_tokens"])
-	}
-	// Next turn reuses the full prior transcript (inputs + assistant output) as context.
-	return max(int64(0), input) + max(int64(0), output)
-}
-
-func jsonInt64(value any) int64 {
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed)
-	case int64:
-		return typed
-	case int:
-		return int64(typed)
-	case json.Number:
-		n, _ := typed.Int64()
-		return n
-	default:
-		return 0
 	}
 }
 

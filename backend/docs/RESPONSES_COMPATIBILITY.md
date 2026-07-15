@@ -131,9 +131,9 @@ Messages 转换层兼容 Claude Code 常见载荷：标准顶层 `system` 与误
 
 不保存 prompt、response body、encrypted reasoning 内容或工具参数。
 
-Grok Web 未提供与公开 API 等价的精确 Token 计量，因此聊天审计标记 `usageSource: estimated`；图片和视频标记 `usageSource: none`，不会伪造 Token，用量费用仅按已配置的官方媒体单价估算。
+Grok Web 未提供与公开 API 等价的精确 Token 计量，因此聊天审计标记 `usageSource: estimated`；图片和视频标记 `usageSource: none`，不会伪造 Token，用量费用仅按已配置的官方媒体单价估算。Web 不会伪造 `cached_tokens` / `cache_read_input_tokens`（固定为 0）：Grok Web 上游没有官方 prompt-cache 计量。
 
-Web 文本对话会估算 `input_tokens` / `output_tokens`；当客户端使用 `previous_response_id` 续轮时，上游已持有会话上下文，网关会把上一轮 `input+output` 记入 `input_tokens_details.cached_tokens`（Chat 为 `prompt_tokens_details.cached_tokens`，Messages 为 `cache_read_input_tokens`），便于看板与计费按缓存输入价估算。这不是 xAI 官方 cache 计量，而是对服务端会话复用的兼容近似。Grok Build / Console 仍原样透传上游返回的 `cached_tokens`，并用 `prompt_cache_key` 做账号粘滞以命中上游 prompt cache。
+Grok Build / Console 原样透传上游 usage 中的 `input_tokens_details.cached_tokens`（及协议映射字段），并用客户端 `prompt_cache_key` 做账号粘滞，以便命中**上游真实** prompt cache；网关不发明缓存命中数。
 
 Grok Web 付费账号使用 `GrokBuildBilling/GetGrokCreditsConfig` 返回的统一周额度池：保存真实使用百分比、产品枚举分解、周期起止和重置时间，并作为 Chat、Imagine、图片编辑和视频共享的路由总闸门。成功调用后异步刷新周池，不按未知权重进行本地伪扣减；耗尽后按真实周重置时间进入单次恢复队列。
 
