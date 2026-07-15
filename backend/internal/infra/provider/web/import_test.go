@@ -26,6 +26,33 @@ func TestParseImportedCredentialsAcceptsOneSSOTokenPerLine(t *testing.T) {
 	}
 }
 
+func TestParseImportedCredentialsAcceptsEmailColonToken(t *testing.T) {
+	adapter := &Adapter{}
+	// Matches grok-free-register keys/sso.txt: email:eyJ...
+	line := "user@example.com:eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.payload.sig\n" +
+		"other@example.com:sso=token-with-cookie\n" +
+		"eyJraw.jwt.without.email\n"
+	values, err := adapter.ParseImportedCredentials([]byte(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 3 {
+		t.Fatalf("credentials = %#v", values)
+	}
+	if values[0].Email != "user@example.com" || values[0].Name != "user@example.com" {
+		t.Fatalf("email row0 = %#v", values[0])
+	}
+	if !strings.HasPrefix(values[0].AccessToken, "eyJ") {
+		t.Fatalf("token0 = %q", values[0].AccessToken)
+	}
+	if values[1].Email != "other@example.com" || values[1].AccessToken != "token-with-cookie" {
+		t.Fatalf("email row1 = %#v", values[1])
+	}
+	if values[2].Email != "" || values[2].AccessToken != "eyJraw.jwt.without.email" {
+		t.Fatalf("raw jwt row = %#v", values[2])
+	}
+}
+
 func TestParseImportedCredentialsRejectsOversizedPlainToken(t *testing.T) {
 	adapter := &Adapter{}
 	_, err := adapter.ParseImportedCredentials([]byte(strings.Repeat("x", maxSSOTokenBytes+1)))

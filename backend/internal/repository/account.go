@@ -28,6 +28,8 @@ type AccountRepository interface {
 	ListEnabledAccountIDs(ctx context.Context, provider account.Provider, refreshableOnly bool) ([]uint64, error)
 	ListUnlinkedWebAccountIDs(ctx context.Context, limit int) ([]uint64, error)
 	ListFailedAccountIDs(ctx context.Context, provider account.Provider, includeDisabled bool, limit int) ([]uint64, error)
+	// ListSSOAccountsForDedup returns SSO credentials for a provider (enabled or not) with email/token fields for dedup.
+	ListSSOAccountsForDedup(ctx context.Context, provider account.Provider) ([]account.Credential, error)
 	HasActive(ctx context.Context, provider account.Provider) (bool, error)
 	ListRoutingCandidates(ctx context.Context, provider account.Provider, upstreamModel, quotaMode string) ([]account.RoutingCandidate, error)
 	Get(ctx context.Context, id uint64) (account.Credential, error)

@@ -277,6 +277,26 @@ func (r *AccountRepository) ListUnlinkedWebAccountIDs(ctx context.Context, limit
 	return ids, err
 }
 
+// ListSSOAccountsForDedup returns all SSO credentials for a provider (including disabled/reauth).
+func (r *AccountRepository) ListSSOAccountsForDedup(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
+	var rows []accountModel
+	err := r.db.db.WithContext(ctx).
+		Preload("Credential").
+		Preload("WebProfile").
+		Joins("JOIN account_credentials AS credential ON credential.account_id = provider_accounts.id").
+		Where("provider_accounts.provider = ? AND credential.auth_type = ?", provider, account.AuthTypeSSO).
+		Order("provider_accounts.id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toAccountDomain(row))
+	}
+	return out, nil
+}
+
 // ListFailedAccountIDs returns reauthRequired (and optionally disabled) account IDs for a provider.
 func (r *AccountRepository) ListFailedAccountIDs(ctx context.Context, provider account.Provider, includeDisabled bool, limit int) ([]uint64, error) {
 	if limit < 1 {

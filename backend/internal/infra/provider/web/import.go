@@ -22,6 +22,7 @@ type importDocument struct {
 
 type importEntry struct {
 	Name     string `json:"name"`
+	Email    string `json:"email"`
 	SSOToken string `json:"sso_token"`
 	Token    string `json:"token"`
 	Tier     string `json:"tier"`
@@ -70,13 +71,18 @@ func (a *Adapter) ParseImportedCredentials(data []byte) ([]provider.CredentialSe
 		if tier != account.WebTierAuto && tier != account.WebTierBasic && tier != account.WebTierSuper && tier != account.WebTierHeavy {
 			return nil, fmt.Errorf("第 %d 个账号 tier 无效", index+1)
 		}
+		email := normalizeImportEmail(entry.Email)
 		name := strings.TrimSpace(entry.Name)
 		if name == "" {
-			name = fmt.Sprintf("Grok Web %s", security.HashToken(token)[:8])
+			if email != "" {
+				name = email
+			} else {
+				name = fmt.Sprintf("Grok Web %s", security.HashToken(token)[:8])
+			}
 		}
 		result = append(result, provider.CredentialSeed{
 			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: tier,
-			Name: name, SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
+			Name: name, Email: email, SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
 		})
 	}
 	return result, nil
@@ -87,7 +93,8 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 	seen := make(map[string]struct{}, len(lines))
 	result := make([]provider.CredentialSeed, 0, len(lines))
 	for index, line := range lines {
-		token := sanitizeSSOToken(line)
+		email, token := splitEmailSSOToken(line)
+		token = sanitizeSSOToken(token)
 		if token == "" {
 			continue
 		}
@@ -98,9 +105,13 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 			continue
 		}
 		seen[token] = struct{}{}
+		name := email
+		if name == "" {
+			name = "Grok Web " + security.HashToken(token)[:8]
+		}
 		result = append(result, provider.CredentialSeed{
 			Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierAuto,
-			Name: "Grok Web " + security.HashToken(token)[:8], SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
+			Name: name, Email: email, SourceKey: "sso:" + security.HashToken(token), AccessToken: token,
 		})
 		if len(result) > maxImportAccounts {
 			return nil, provider.ErrCredentialLimit
@@ -115,7 +126,7 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
 	document := importDocument{Provider: string(account.ProviderWeb), Accounts: make([]importEntry, 0, len(values))}
 	for _, value := range values {
-		document.Accounts = append(document.Accounts, importEntry{Name: value.Name, SSOToken: value.AccessToken, Tier: string(value.WebTier)})
+		document.Accounts = append(document.Accounts, importEntry{Name: value.Name, Email: value.Email, SSOToken: value.AccessToken, Tier: string(value.WebTier)})
 	}
 	data, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -133,6 +144,44 @@ func sanitizeSSOToken(value string) string {
 		value = token
 	}
 	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(value))
+}
+
+// splitEmailSSOToken accepts:
+//   - raw token
+//   - email:token
+//   - email:sso=token
+func splitEmailSSOToken(line string) (email, token string) {
+	line = strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(line))
+	if line == "" {
+		return "", ""
+	}
+	// JWT tokens start with eyJ... and contain dots — not email:token.
+	if strings.HasPrefix(line, "eyJ") || !strings.Contains(line, "@") {
+		return "", line
+	}
+	// Prefer last colon after email local@domain:token (token may contain colons rarely).
+	at := strings.Index(line, "@")
+	if at < 0 {
+		return "", line
+	}
+	// Find first ':' after the domain (after @).
+	rest := line[at+1:]
+	colon := strings.Index(rest, ":")
+	if colon < 0 {
+		// email only without token
+		return normalizeImportEmail(line), ""
+	}
+	emailPart := line[:at+1+colon]
+	tokenPart := rest[colon+1:]
+	return normalizeImportEmail(emailPart), tokenPart
+}
+
+func normalizeImportEmail(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || !strings.Contains(value, "@") || strings.ContainsAny(value, " \t") {
+		return ""
+	}
+	return value
 }
 
 func firstNonEmpty(values ...string) string {

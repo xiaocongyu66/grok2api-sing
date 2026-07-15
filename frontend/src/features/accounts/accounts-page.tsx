@@ -37,6 +37,7 @@ import {
   deleteAccounts,
   deleteFailedAccounts,
   convertWebAccountsToBuild,
+  dedupSSOByEmail,
   exportAccounts,
   getAccountSummary,
   importAccounts,
@@ -88,6 +89,7 @@ export function AccountsPage() {
   const conversionAbortRef = useRef<AbortController | null>(null);
   const webConsoleSyncAbortRef = useRef<AbortController | null>(null);
   const validateAbortRef = useRef<AbortController | null>(null);
+  const dedupAbortRef = useRef<AbortController | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
   const importToastRef = useRef<string | number | null>(null);
   const [provider, setProvider] = useState<AccountProvider>("grok_build");
@@ -104,6 +106,8 @@ export function AccountsPage() {
   const [validateAllOpen, setValidateAllOpen] = useState(false);
   const [validatePreselectOpen, setValidatePreselectOpen] = useState(false);
   const [validateProgress, setValidateProgress] = useState<AccountTaskProgressDTO | null>(null);
+  const [dedupOpen, setDedupOpen] = useState(false);
+  const [dedupProgress, setDedupProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [syncProgress, setSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
@@ -128,6 +132,7 @@ export function AccountsPage() {
     conversionAbortRef.current?.abort();
     webConsoleSyncAbortRef.current?.abort();
     validateAbortRef.current?.abort();
+    dedupAbortRef.current?.abort();
     importAbortRef.current?.abort();
     if (importToastRef.current !== null) toast.dismiss(importToastRef.current);
   }, []);
@@ -405,6 +410,34 @@ export function AccountsPage() {
     onError: showError,
   });
 
+  const dedupMutation = useMutation({
+    mutationFn: () => {
+      const controller = new AbortController();
+      dedupAbortRef.current = controller;
+      setDedupProgress({ completed: 0, total: 0 });
+      return dedupSSOByEmail(provider, setDedupProgress, controller.signal);
+    },
+    onSuccess: (result) => {
+      setDedupOpen(false);
+      setSelected(new Set());
+      invalidateAccountData();
+      toast.success(t("accounts.dedupCompleted", {
+        groups: result.groups,
+        kept: result.kept,
+        deleted: result.deleted,
+        rateLimited: result.keptRateLimited,
+        noEmail: result.skippedNoEmail,
+      }));
+    },
+    onError: (error) => {
+      if (!isAbortError(error)) showError(error);
+    },
+    onSettled: () => {
+      dedupAbortRef.current = null;
+      setDedupProgress(null);
+    },
+  });
+
   const validateMutation = useMutation({
     mutationFn: (input: { mode: "selected"; ids: string[] } | { mode: "all" } | { mode: "preselect" }) => {
       const controller = new AbortController();
@@ -679,6 +712,13 @@ export function AccountsPage() {
                     {t("accounts.deleteFailed", { count: providerFailedCount })}
                   </Button>
                 ) : null}
+                {hasProviderAccounts && (provider === "grok_web" || provider === "grok_console") ? (
+                  <Button variant="secondary" size="sm" disabled={dedupMutation.isPending} onClick={() => setDedupOpen(true)}>
+                    {dedupMutation.isPending && dedupProgress
+                      ? t("accounts.dedupProgress", dedupProgress)
+                      : t("accounts.dedupSSO")}
+                  </Button>
+                ) : null}
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets("all")}>{t("webConsoleSync.allAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
@@ -948,6 +988,25 @@ export function AccountsPage() {
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
             <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" disabled={deleteFailedMutation.isPending} onClick={() => deleteFailedMutation.mutate()}>
               {deleteFailedMutation.isPending ? <Spinner /> : t("accounts.deleteFailedConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={dedupOpen} onOpenChange={(open) => {
+        if (!open && dedupMutation.isPending) dedupAbortRef.current?.abort();
+        setDedupOpen(open);
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("accounts.dedupTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("accounts.dedupDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {dedupProgress ? <p className="text-xs text-muted-foreground">{t("accounts.dedupProgress", dedupProgress)}</p> : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={dedupMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction disabled={dedupMutation.isPending} onClick={() => dedupMutation.mutate()}>
+              {dedupMutation.isPending ? <Spinner /> : t("accounts.dedupConfirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

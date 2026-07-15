@@ -143,6 +143,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/refresh-tokens", h.refreshAllTokens)
 	router.POST("/accounts/batch/refresh-billing", h.batchRefreshBilling)
 	router.POST("/accounts/batch/validate", h.batchValidate)
+	router.POST("/accounts/batch/dedup-sso-email", h.dedupSSOEmail)
 	router.DELETE("/accounts/failed", h.deleteFailed)
 	router.PATCH("/accounts/batch", h.batchUpdate)
 	router.DELETE("/accounts", h.batchDelete)
@@ -187,6 +188,20 @@ type batchValidateRequest struct {
 	Preselect bool     `json:"preselect"`
 	// Limit is the preselect sample size (default 5). If fewer accounts remain, all are tested.
 	Limit int `json:"limit"`
+}
+
+type dedupSSOEmailRequest struct {
+	Provider string `json:"provider" binding:"required"`
+}
+
+type dedupSSOEmailResponse struct {
+	Groups          int `json:"groups"`
+	Probed          int `json:"probed"`
+	Kept            int `json:"kept"`
+	Deleted         int `json:"deleted"`
+	KeptRateLimited int `json:"keptRateLimited"`
+	SkippedNoEmail  int `json:"skippedNoEmail"`
+	Single          int `json:"single"`
 }
 
 type accountSelectionRequest struct {
@@ -450,6 +465,30 @@ func (h *Handler) deleteFailed(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
+}
+
+func (h *Handler) dedupSSOEmail(c *gin.Context) {
+	var request dedupSSOEmailRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	providerValue := accountdomain.Provider(request.Provider)
+	if !providerValue.IsValid() {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
+		return
+	}
+	stream := newAccountEventStream(c)
+	defer stream.Close()
+	result, err := h.service.DeduplicateSSOByEmail(c.Request.Context(), providerValue, stream.ProgressObserver())
+	if err != nil {
+		stream.WriteError("accountDedupFailed", err.Error())
+		return
+	}
+	_ = stream.Write("complete", dedupSSOEmailResponse{
+		Groups: result.Groups, Probed: result.Probed, Kept: result.Kept, Deleted: result.Deleted,
+		KeptRateLimited: result.KeptRateLimited, SkippedNoEmail: result.SkippedNoEmail, Single: result.Single,
+	})
 }
 
 func (h *Handler) batchValidate(c *gin.Context) {

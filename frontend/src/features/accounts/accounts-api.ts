@@ -260,7 +260,7 @@ export type AccountImportResultDTO = {
   syncFailed: number;
 };
 
-type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO> & {
+type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO & SSOEmailDedupResultDTO> & {
   code?: string;
   message?: string;
 };
@@ -269,6 +269,8 @@ const decodeAccountTaskStreamPayload = createObjectDecoder<AccountTaskStreamPayl
   created: isOptional(isNumber), linked: isOptional(isNumber), skipped: isOptional(isNumber), failed: isOptional(isNumber),
   synced: isOptional(isNumber), syncFailed: isOptional(isNumber), completed: isOptional(isNumber), total: isOptional(isNumber),
   phase: isOptional(isOneOf("importing", "converting", "syncing")), updated: isOptional(isNumber), succeeded: isOptional(isNumber),
+  groups: isOptional(isNumber), probed: isOptional(isNumber), kept: isOptional(isNumber), deleted: isOptional(isNumber),
+  keptRateLimited: isOptional(isNumber), skippedNoEmail: isOptional(isNumber), single: isOptional(isNumber),
   code: isOptional(isString), message: isOptional(isString),
 });
 
@@ -432,6 +434,23 @@ export function validateAllEnabledAccounts(provider: AccountProvider, onProgress
 /** Preselect ~5 (or fewer if pool is smaller) high-priority enabled accounts and probe them. */
 export function validatePreselectedAccounts(provider: AccountProvider, limit = 5, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountValidateResultDTO> {
   return runAccountTask("/api/admin/v1/accounts/batch/validate", { preselect: true, limit, provider }, [...validateResultFields], onProgress, signal);
+}
+
+export type SSOEmailDedupResultDTO = {
+  groups: number;
+  probed: number;
+  kept: number;
+  deleted: number;
+  keptRateLimited: number;
+  skippedNoEmail: number;
+  single: number;
+};
+
+const dedupResultFields = ["groups", "probed", "kept", "deleted", "keptRateLimited", "skippedNoEmail", "single"] as const;
+
+/** Deduplicate SSO accounts by email: keep usable tokens (incl. 429), delete dead ones. */
+export function dedupSSOByEmail(provider: AccountProvider, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<SSOEmailDedupResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/batch/dedup-sso-email", { provider }, [...dedupResultFields], onProgress, signal);
 }
 
 export function startDeviceAuthorization(): Promise<DeviceSessionDTO> {

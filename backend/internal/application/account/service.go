@@ -477,6 +477,251 @@ func (s *Service) DeleteFailedAccounts(ctx context.Context, providerValue accoun
 	}
 }
 
+// SSOEmailDedupResult summarizes email-based SSO token deduplication.
+type SSOEmailDedupResult struct {
+	Groups          int // email groups with 2+ accounts
+	Probed          int
+	Kept            int
+	Deleted         int
+	KeptRateLimited int // kept despite 429 / transient rate limit
+	SkippedNoEmail  int
+	Single          int // emails with only one account (no action)
+}
+
+// DeduplicateSSOByEmail groups SSO accounts by email within a provider.
+// For each email with multiple different tokens:
+//   - probe each credential;
+//   - keep usable ones (including 429/rate-limit as usable);
+//   - if at least one is usable, delete only the permanently dead duplicates;
+//   - if none are usable, delete the entire email group.
+// Accounts without email are skipped (import email:token to populate).
+func (s *Service) DeduplicateSSOByEmail(ctx context.Context, providerValue accountdomain.Provider, progress BatchProgressObserver) (SSOEmailDedupResult, error) {
+	if !providerValue.IsValid() {
+		return SSOEmailDedupResult{}, ErrInvalidInput
+	}
+	if providerValue != accountdomain.ProviderWeb && providerValue != accountdomain.ProviderConsole {
+		return SSOEmailDedupResult{}, invalidInput("邮箱去重仅支持 Grok Web / Console SSO 号池")
+	}
+	values, err := s.accounts.ListSSOAccountsForDedup(ctx, providerValue)
+	if err != nil {
+		return SSOEmailDedupResult{}, err
+	}
+	byEmail := make(map[string][]accountdomain.Credential)
+	result := SSOEmailDedupResult{}
+	for _, value := range values {
+		email := strings.ToLower(strings.TrimSpace(value.Email))
+		if email == "" {
+			// Fall back to name when it looks like an email (email:token import stores name=email).
+			if candidate := strings.ToLower(strings.TrimSpace(value.Name)); strings.Contains(candidate, "@") && !strings.ContainsAny(candidate, " \t") {
+				email = candidate
+			}
+		}
+		if email == "" {
+			result.SkippedNoEmail++
+			continue
+		}
+		byEmail[email] = append(byEmail[email], value)
+	}
+
+	type emailGroup struct {
+		email string
+		items []accountdomain.Credential
+	}
+	groups := make([]emailGroup, 0)
+	for email, items := range byEmail {
+		if len(items) < 2 {
+			result.Single++
+			continue
+		}
+		// Collapse identical SourceKey/token hashes first — same token stored twice.
+		unique := uniqueSSOBySourceKey(items)
+		if len(unique) < 2 {
+			// Same token duplicated rows: keep one, delete rest without probing.
+			keep := unique[0].ID
+			var remove []uint64
+			for _, item := range items {
+				if item.ID != keep {
+					remove = append(remove, item.ID)
+				}
+			}
+			if n, delErr := s.deleteAccountIDsChunked(ctx, remove); delErr != nil {
+				return result, delErr
+			} else {
+				result.Deleted += int(n)
+				result.Kept++
+				result.Groups++
+			}
+			continue
+		}
+		groups = append(groups, emailGroup{email: email, items: unique})
+	}
+	result.Groups += len(groups)
+	if progress != nil {
+		_ = progress(0, len(groups))
+	}
+	completed := 0
+	for _, group := range groups {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		var keep []uint64
+		var drop []uint64
+		var rateLimited int
+		for _, item := range group.items {
+			result.Probed++
+			outcome := s.classifySSOProbe(ctx, item)
+			switch outcome {
+			case ssoProbeUsable:
+				keep = append(keep, item.ID)
+			case ssoProbeRateLimited:
+				keep = append(keep, item.ID)
+				rateLimited++
+			default:
+				drop = append(drop, item.ID)
+			}
+		}
+		if len(keep) == 0 {
+			// All dead → delete entire group.
+			all := make([]uint64, 0, len(group.items))
+			for _, item := range group.items {
+				all = append(all, item.ID)
+			}
+			n, delErr := s.deleteAccountIDsChunked(ctx, all)
+			result.Deleted += int(n)
+			if delErr != nil {
+				return result, delErr
+			}
+		} else {
+			result.Kept += len(keep)
+			result.KeptRateLimited += rateLimited
+			n, delErr := s.deleteAccountIDsChunked(ctx, drop)
+			result.Deleted += int(n)
+			if delErr != nil {
+				return result, delErr
+			}
+		}
+		completed++
+		if progress != nil {
+			if err := progress(completed, len(groups)); err != nil {
+				return result, err
+			}
+		}
+	}
+	return result, nil
+}
+
+type ssoProbeOutcome int
+
+const (
+	ssoProbeUsable ssoProbeOutcome = iota
+	ssoProbeRateLimited
+	ssoProbeDead
+)
+
+func (s *Service) classifySSOProbe(ctx context.Context, value accountdomain.Credential) ssoProbeOutcome {
+	// Always live-probe: reauthRequired may be stale after re-import of a good token.
+	// 429 / rate-limit / network blips count as usable (keep).
+	probeErr := s.probeAccountUpstream(ctx, value)
+	if probeErr == nil {
+		return ssoProbeUsable
+	}
+	if isRateLimitOrTransient(probeErr) {
+		return ssoProbeRateLimited
+	}
+	if permanentCredentialError(probeErr) || errors.Is(probeErr, provider.ErrUnauthorized) {
+		_ = s.MarkReauthRequired(context.WithoutCancel(ctx), value.ID, "sso email dedup: credential rejected")
+		return ssoProbeDead
+	}
+	// Unknown transient (network): keep to be safe (same spirit as 429).
+	s.logger.Warn("sso_email_dedup_transient", "account_id", value.ID, "email", value.Email, "error", probeErr)
+	return ssoProbeRateLimited
+}
+
+func isRateLimitOrTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, provider.ErrUnauthorized) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{"429", "too many", "rate limit", "ratelimit", "retry later", "timeout", "temporar", "connection reset", "eof", "context deadline"} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	var refreshErr *provider.CredentialRefreshError
+	if errors.As(err, &refreshErr) {
+		if refreshErr.Status == 429 {
+			return true
+		}
+		if !refreshErr.Permanent {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueSSOBySourceKey(items []accountdomain.Credential) []accountdomain.Credential {
+	seen := make(map[string]accountdomain.Credential, len(items))
+	order := make([]string, 0, len(items))
+	for _, item := range items {
+		key := strings.TrimSpace(item.SourceKey)
+		if key == "" {
+			key = fmt.Sprintf("id:%d", item.ID)
+		}
+		if _, ok := seen[key]; ok {
+			// Prefer enabled+active when collapsing exact token duplicates.
+			prev := seen[key]
+			if betterSSODuplicate(item, prev) {
+				seen[key] = item
+			}
+			continue
+		}
+		seen[key] = item
+		order = append(order, key)
+	}
+	out := make([]accountdomain.Credential, 0, len(order))
+	for _, key := range order {
+		out = append(out, seen[key])
+	}
+	return out
+}
+
+func betterSSODuplicate(candidate, existing accountdomain.Credential) bool {
+	score := func(v accountdomain.Credential) int {
+		n := 0
+		if v.Enabled {
+			n += 2
+		}
+		if v.AuthStatus == accountdomain.AuthStatusActive {
+			n += 2
+		}
+		return n
+	}
+	return score(candidate) > score(existing)
+}
+
+func (s *Service) deleteAccountIDsChunked(ctx context.Context, ids []uint64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	const chunk = 500
+	var deleted int64
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		n, err := s.BatchDelete(ctx, ids[start:end])
+		deleted += n
+		if err != nil {
+			return deleted, err
+		}
+	}
+	return deleted, nil
+}
+
 // DefaultPreselectValidateCount is the minimum sample size for preselected account probes.
 // When fewer enabled accounts remain, all of them are tested.
 const DefaultPreselectValidateCount = 5
