@@ -400,12 +400,17 @@ export function AccountsPage() {
   });
 
   const deleteFailedMutation = useMutation({
-    mutationFn: () => deleteFailedAccounts(provider, false),
+    // Include disabled so attention-side issues (reauth + disabled) are purged; quota recovering accounts are kept.
+    mutationFn: () => deleteFailedAccounts(provider, true),
     onSuccess: (result) => {
       setDeleteFailedOpen(false);
       setSelected(new Set());
       invalidateAccountData();
-      toast.success(t("accounts.failedDeleted", { count: result.deleted }));
+      if (result.deleted <= 0) {
+        toast.message(t("accounts.failedDeletedNone"));
+      } else {
+        toast.success(t("accounts.failedDeleted", { count: result.deleted }));
+      }
     },
     onError: showError,
   });
@@ -603,7 +608,9 @@ export function AccountsPage() {
   const buildSummary = summary?.providers.grok_build ?? emptyProviderSummary;
   const webSummary = summary?.providers.grok_web ?? emptyProviderSummary;
   const consoleSummary = summary?.providers.grok_console ?? emptyProviderSummary;
-  const providerFailedCount = summary?.providers[provider]?.reauthRequired ?? 0;
+  const providerFailedCount = (summary?.providers[provider]?.reauthRequired ?? 0) + (summary?.providers[provider]?.disabled ?? 0);
+  const providerReauthCount = summary?.providers[provider]?.reauthRequired ?? 0;
+  const providerDisabledCount = summary?.providers[provider]?.disabled ?? 0;
   const summaryLoading = summaryQuery.isPending;
   const summaryUnavailable = summaryQuery.isError;
   const providerAccountTotal = provider === "grok_build" ? buildSummary.total : provider === "grok_web" ? webSummary.total : consoleSummary.total;
@@ -694,37 +701,37 @@ export function AccountsPage() {
                 <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
               </div>
             ) : (
-              <div className="flex items-center gap-1.5">
+              <div className="grid w-full grid-cols-2 gap-1.5 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
                 {hasProviderAccounts ? (
                   <>
-                    <Button variant="secondary" size="sm" disabled={validateMutation.isPending} onClick={() => setValidatePreselectOpen(true)}>
+                    <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" disabled={validateMutation.isPending} onClick={() => setValidatePreselectOpen(true)}>
                       {validateMutation.isPending && validateProgress
                         ? t("accounts.validatingProgress", validateProgress)
                         : t("accounts.validatePreselect")}
                     </Button>
-                    <Button variant="secondary" size="sm" disabled={validateMutation.isPending} onClick={() => setValidateAllOpen(true)}>
+                    <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" disabled={validateMutation.isPending} onClick={() => setValidateAllOpen(true)}>
                       {t("accounts.validateAllEnabled")}
                     </Button>
                   </>
                 ) : null}
                 {hasProviderAccounts && providerFailedCount > 0 ? (
-                  <Button variant="secondary" size="sm" className="text-destructive" onClick={() => setDeleteFailedOpen(true)}>
-                    {t("accounts.deleteFailed", { count: providerFailedCount })}
+                  <Button variant="secondary" size="sm" className="w-full justify-center text-destructive sm:w-auto" disabled={deleteFailedMutation.isPending} onClick={() => setDeleteFailedOpen(true)}>
+                    {deleteFailedMutation.isPending ? <Spinner /> : t("accounts.deleteFailed", { count: providerFailedCount })}
                   </Button>
                 ) : null}
                 {hasProviderAccounts && (provider === "grok_web" || provider === "grok_console") ? (
-                  <Button variant="secondary" size="sm" disabled={dedupMutation.isPending} onClick={() => setDedupOpen(true)}>
+                  <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" disabled={dedupMutation.isPending} onClick={() => setDedupOpen(true)}>
                     {dedupMutation.isPending && dedupProgress
                       ? t("accounts.dedupProgress", dedupProgress)
                       : t("accounts.dedupSSO")}
                   </Button>
                 ) : null}
-                {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
-                {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" onClick={() => setWebConsoleSyncTargets("all")}>{t("webConsoleSync.allAction")}</Button> : null}
-                {hasProviderAccounts ? <Button variant="secondary" size="sm" onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
-                {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
+                {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" onClick={() => setConversionTargets("all")}>{t("accountBulk.convertAllToBuild")}</Button> : null}
+                {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" onClick={() => setWebConsoleSyncTargets("all")}>{t("webConsoleSync.allAction")}</Button> : null}
+                {hasProviderAccounts ? <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
+                {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" className="w-full justify-center sm:w-auto" onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
                 <DropdownMenu>
-                  <DropdownMenuTrigger asChild><Button size="sm">{t("accounts.connectAccount")}</Button></DropdownMenuTrigger>
+                  <DropdownMenuTrigger asChild><Button size="sm" className="w-full justify-center sm:w-auto">{t("accounts.connectAccount")}</Button></DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     {provider === "grok_build" ? <DropdownMenuItem onClick={() => void startDeviceLogin()}><ExternalLink />{t("accounts.deviceLogin")}</DropdownMenuItem> : null}
                     {provider !== "grok_build" ? <DropdownMenuItem disabled={importMutation.isPending} onClick={() => setQuickImportOpen(true)}><ClipboardPaste />{t("accounts.quickImportSSO")}</DropdownMenuItem> : null}
@@ -982,11 +989,23 @@ export function AccountsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t("accounts.deleteFailedTitle", { count: providerFailedCount })}</AlertDialogTitle>
-            <AlertDialogDescription>{t("accounts.deleteFailedDescription")}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {t("accounts.deleteFailedDescription", {
+                reauth: providerReauthCount,
+                disabled: providerDisabledCount,
+              })}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-            <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" disabled={deleteFailedMutation.isPending} onClick={() => deleteFailedMutation.mutate()}>
+            <AlertDialogCancel disabled={deleteFailedMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              disabled={deleteFailedMutation.isPending}
+              onClick={(event) => {
+                event.preventDefault();
+                deleteFailedMutation.mutate();
+              }}
+            >
               {deleteFailedMutation.isPending ? <Spinner /> : t("accounts.deleteFailedConfirm")}
             </AlertDialogAction>
           </AlertDialogFooter>

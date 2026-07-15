@@ -302,17 +302,18 @@ func (r *AccountRepository) ListFailedAccountIDs(ctx context.Context, provider a
 	if limit < 1 {
 		return []uint64{}, nil
 	}
-	query := r.db.db.WithContext(ctx).
-		Table("provider_accounts AS account").
-		Select("account.id").
-		Where("account.provider = ?", provider)
+	// Use the model table directly (no alias) so Postgres/SQLite both scan IDs reliably.
+	query := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("id").Where("provider = ?", string(provider))
 	if includeDisabled {
-		query = query.Where("account.auth_status = ? OR account.enabled = ?", account.AuthStatusReauthRequired, false)
+		query = query.Where("auth_status = ? OR enabled = ?", string(account.AuthStatusReauthRequired), false)
 	} else {
-		query = query.Where("account.auth_status = ?", account.AuthStatusReauthRequired)
+		query = query.Where("auth_status = ?", string(account.AuthStatusReauthRequired))
 	}
 	var ids []uint64
-	err := query.Order("account.id ASC").Limit(limit).Scan(&ids).Error
+	err := query.Order("id ASC").Limit(limit).Scan(&ids).Error
+	if ids == nil {
+		ids = []uint64{}
+	}
 	return ids, err
 }
 
@@ -584,8 +585,21 @@ func (r *AccountRepository) DeleteMany(ctx context.Context, ids []uint64) (int64
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	result := r.db.db.WithContext(ctx).Where("id IN ?", ids).Delete(&accountModel{})
-	return result.RowsAffected, result.Error
+	var deleted int64
+	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// media_jobs.account_id is ON DELETE RESTRICT — clear those rows first or bulk account delete fails silently in some drivers.
+		if err := tx.Where("account_id IN ?", ids).Delete(&mediaJobModel{}).Error; err != nil {
+			return err
+		}
+		// request_audits may keep a nullable account_id without cascade on older schemas.
+		if err := tx.Model(&requestAuditModel{}).Where("account_id IN ?", ids).Update("account_id", nil).Error; err != nil {
+			return err
+		}
+		result := tx.Where("id IN ?", ids).Delete(&accountModel{})
+		deleted = result.RowsAffected
+		return result.Error
+	})
+	return deleted, err
 }
 
 func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessToken, refreshToken string, expiresAt time.Time) (account.Credential, error) {

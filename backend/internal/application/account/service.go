@@ -453,8 +453,9 @@ func (s *Service) DeleteFailedAccounts(ctx context.Context, providerValue accoun
 		return 0, ErrInvalidInput
 	}
 	const chunk = 500
+	const maxRounds = 20000 // safety: 20000 * 500 = 10M rows
 	var deleted int64
-	for {
+	for round := 0; round < maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
 			return deleted, err
 		}
@@ -464,17 +465,31 @@ func (s *Service) DeleteFailedAccounts(ctx context.Context, providerValue accoun
 			return deleted, err
 		}
 		if len(ids) == 0 {
+			if s.logger != nil {
+				s.logger.Info("delete_failed_accounts_done", "provider", providerValue, "include_disabled", includeDisabled, "deleted", deleted, "rounds", round)
+			}
 			return deleted, nil
 		}
 		n, err := s.BatchDelete(ctx, ids)
 		deleted += n
+		if s.logger != nil {
+			s.logger.Info("delete_failed_accounts_chunk", "provider", providerValue, "batch", len(ids), "deleted_rows", n, "total_deleted", deleted)
+		}
 		if err != nil {
 			return deleted, err
 		}
+		// Guard against infinite loop if rows cannot be deleted (FK) but still match the list query.
+		if n == 0 {
+			return deleted, fmt.Errorf("%w: 匹配到 %d 个失效账号但无法删除（可能被 media_jobs 等外键占用）", ErrInvalidInput, len(ids))
+		}
 		if len(ids) < chunk {
+			if s.logger != nil {
+				s.logger.Info("delete_failed_accounts_done", "provider", providerValue, "include_disabled", includeDisabled, "deleted", deleted, "rounds", round+1)
+			}
 			return deleted, nil
 		}
 	}
+	return deleted, fmt.Errorf("%w: 删除失效账号超过安全轮次上限", ErrInvalidInput)
 }
 
 // SSOEmailDedupResult summarizes email-based SSO token deduplication.
@@ -494,6 +509,7 @@ type SSOEmailDedupResult struct {
 //   - keep usable ones (including 429/rate-limit as usable);
 //   - if at least one is usable, delete only the permanently dead duplicates;
 //   - if none are usable, delete the entire email group.
+//
 // Accounts without email are skipped (import email:token to populate).
 func (s *Service) DeduplicateSSOByEmail(ctx context.Context, providerValue accountdomain.Provider, progress BatchProgressObserver) (SSOEmailDedupResult, error) {
 	if !providerValue.IsValid() {
