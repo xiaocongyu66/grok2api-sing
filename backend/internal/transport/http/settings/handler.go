@@ -28,8 +28,16 @@ type settingsConfigDTO struct {
 	Batch                 batchConfigDTO                 `json:"batch"`
 	Media                 mediaConfigDTO                 `json:"media"`
 	Routing               routingConfigDTO               `json:"routing"`
+	PromptCacheAffinity   promptCacheAffinityConfigDTO   `json:"promptCacheAffinity"`
 	Audit                 auditConfigDTO                 `json:"audit"`
 	ClientKeyDefaults     clientKeyDefaultsConfigDTO     `json:"clientKeyDefaults"`
+}
+
+type promptCacheAffinityConfigDTO struct {
+	Enabled     bool   `json:"enabled"`
+	Fingerprint bool   `json:"fingerprint"`
+	Expire      bool   `json:"expire"`
+	TTL         string `json:"ttl"`
 }
 
 type proactiveUpstreamSyncConfigDTO struct {
@@ -198,6 +206,10 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			AllowManualBillingRefresh: value.ProactiveUpstreamSync.AllowManualBillingRefresh,
 			AllowManualQuotaRefresh:   value.ProactiveUpstreamSync.AllowManualQuotaRefresh,
 		},
+		PromptCacheAffinity: settingsapp.PromptCacheAffinityConfig{
+			Enabled: value.PromptCacheAffinity.Enabled, Fingerprint: value.PromptCacheAffinity.Fingerprint,
+			Expire: value.PromptCacheAffinity.Expire, TTL: value.PromptCacheAffinity.TTL,
+		},
 	}
 }
 
@@ -242,6 +254,10 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 			},
 			ClientKeyDefaults: clientKeyDefaultsConfigDTO{
 				RPMLimit: config.ClientKeyDefaults.RPMLimit, MaxConcurrent: config.ClientKeyDefaults.MaxConcurrent,
+			},
+			PromptCacheAffinity: promptCacheAffinityConfigDTO{
+				Enabled: config.PromptCacheAffinity.Enabled, Fingerprint: config.PromptCacheAffinity.Fingerprint,
+				Expire: config.PromptCacheAffinity.Expire, TTL: config.PromptCacheAffinity.TTL,
 			},
 			ProactiveUpstreamSync: proactiveUpstreamSyncConfigDTO{
 				Billing:                   config.ProactiveUpstreamSync.Billing,

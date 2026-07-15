@@ -18,6 +18,7 @@ import (
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
+	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
@@ -26,6 +27,7 @@ type Handler struct {
 	gateway      *gateway.Service
 	models       *modelapp.Service
 	maxBodyBytes int64
+	affinity     *promptcache.Resolver
 }
 
 const (
@@ -44,6 +46,13 @@ const mediaTransferErrorTrailer = "X-Grok2API-Transfer-Error"
 
 func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBodyBytes int64) *Handler {
 	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes}
+}
+
+// SetPromptCacheAffinity attaches the optional stable conv-id resolver (Redis/memory).
+func (h *Handler) SetPromptCacheAffinity(resolver *promptcache.Resolver) {
+	if h != nil {
+		h.affinity = resolver
+	}
 }
 
 func (h *Handler) Register(router *gin.RouterGroup) {
@@ -207,7 +216,7 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	if request.Metadata != nil {
 		metadataUserID = request.Metadata.UserID
 	}
-	promptCacheKey := resolvePromptCacheKey(c, request.PromptCacheKey, request.User, metadataUserID)
+	promptCacheKey := h.resolvePromptCacheKey(c, clientKey, request.PromptCacheKey, request.User, metadataUserID)
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
@@ -251,7 +260,7 @@ func (h *Handler) createMessage(c *gin.Context) {
 	if request.Metadata != nil {
 		metadataUserID = request.Metadata.UserID
 	}
-	promptCacheKey := resolvePromptCacheKey(c, "", "", metadataUserID)
+	promptCacheKey := h.resolvePromptCacheKey(c, clientKey, "", "", metadataUserID)
 	result, err := h.gateway.CreateMessage(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
@@ -264,23 +273,50 @@ func (h *Handler) createMessage(c *gin.Context) {
 }
 
 // resolvePromptCacheKey picks a stable conversation affinity key for xAI prompt caching.
-// Priority: explicit body fields → x-grok-conv-id style headers. Empty means the Build
-// adapter will generate a one-off id (cache miss by design).
-func resolvePromptCacheKey(c *gin.Context, explicit, user, metadataUserID string) string {
+// Priority: body fields / client session headers → fingerprint mapping (when enabled).
+func (h *Handler) resolvePromptCacheKey(c *gin.Context, clientKey clientkeydomain.Key, explicit, user, metadataUserID string) string {
+	headers := map[string]string{}
+	for _, name := range []string{
+		"x-grok-conv-id", "x-grok-conversation-id",
+		"x-claude-code-session-id", "session-id", "x-session-id",
+		"x-codex-window-id", "x-codex-session-id",
+	} {
+		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
+			headers[strings.ToLower(name)] = value
+		}
+	}
+	// Legacy helper for tests without resolver.
+	if h == nil || h.affinity == nil {
+		return resolvePromptCacheKeyLegacy(c, explicit, user, metadataUserID)
+	}
+	id, err := h.affinity.Resolve(c.Request.Context(), promptcache.Request{
+		ClientKeyID: clientKey.ID, ClientIP: c.ClientIP(), UserAgent: c.Request.UserAgent(),
+		Headers: headers, Explicit: explicit, User: user, MetadataUserID: metadataUserID,
+	})
+	if err != nil || id == "" {
+		return resolvePromptCacheKeyLegacy(c, explicit, user, metadataUserID)
+	}
+	return id
+}
+
+func resolvePromptCacheKeyLegacy(c *gin.Context, explicit, user, metadataUserID string) string {
 	for _, candidate := range []string{
-		explicit,
-		user,
-		metadataUserID,
-		c.GetHeader("x-grok-conv-id"),
-		c.GetHeader("X-Grok-Conv-Id"),
-		c.GetHeader("x-grok-conversation-id"),
-		c.GetHeader("X-Grok-Conversation-Id"),
+		explicit, user, metadataUserID,
+		c.GetHeader("x-grok-conv-id"), c.GetHeader("X-Grok-Conv-Id"),
+		c.GetHeader("x-grok-conversation-id"), c.GetHeader("X-Grok-Conversation-Id"),
+		c.GetHeader("x-claude-code-session-id"), c.GetHeader("session-id"), c.GetHeader("x-session-id"),
+		c.GetHeader("x-codex-window-id"), c.GetHeader("x-codex-session-id"),
 	} {
 		if value := strings.TrimSpace(candidate); value != "" {
 			return value
 		}
 	}
 	return ""
+}
+
+// resolvePromptCacheKey keeps the old package-level helper name for unit tests.
+func resolvePromptCacheKey(c *gin.Context, explicit, user, metadataUserID string) string {
+	return resolvePromptCacheKeyLegacy(c, explicit, user, metadataUserID)
 }
 
 func (h *Handler) generateImage(c *gin.Context) {
@@ -701,7 +737,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	if request.Metadata != nil {
 		metadataUserID = request.Metadata.UserID
 	}
-	promptCacheKey := resolvePromptCacheKey(c, request.PromptCacheKey, request.User, metadataUserID)
+	promptCacheKey := h.resolvePromptCacheKey(c, clientKey, request.PromptCacheKey, request.User, metadataUserID)
 	input := gateway.Input{RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model, Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey, PreviousResponseID: request.PreviousResponseID}
 	var result *gateway.Result
 	if compact {

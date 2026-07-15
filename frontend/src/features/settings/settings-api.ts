@@ -40,6 +40,7 @@ export type SettingsConfigDTO = {
     stickyTTL: string; cooldownBase: string; cooldownMax: string; capacityWait: string; maxAttempts: number;
     retryStatusCodes: number[]; retryServerErrors: boolean;
   };
+  promptCacheAffinity: { enabled: boolean; fingerprint: boolean; expire: boolean; ttl: string };
   audit: { bufferSize: number; batchSize: number; flushInterval: string };
   clientKeyDefaults: { rpmLimit: number; maxConcurrent: number };
 };
@@ -263,6 +264,9 @@ const settingsConfigValidator = hasShape({
   routing: hasShape({
     stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber,
     retryStatusCodes: isArrayOf(isNumber), retryServerErrors: isBoolean,
+  }),
+  promptCacheAffinity: hasShape({
+    enabled: isBoolean, fingerprint: isBoolean, expire: isBoolean, ttl: isString,
   }),
   audit: hasShape({ bufferSize: isNumber, batchSize: isNumber, flushInterval: isString }),
   clientKeyDefaults: hasShape({ rpmLimit: isNumber, maxConcurrent: isNumber }),

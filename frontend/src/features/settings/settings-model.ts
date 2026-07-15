@@ -99,6 +99,12 @@ export const settingsSchema = z.object({
     }),
     retryServerErrors: z.boolean(),
   }).refine((value) => durationSeconds(value.cooldownMax) >= durationSeconds(value.cooldownBase), { path: ["cooldownMax"] }),
+  promptCacheAffinity: z.object({
+    enabled: z.boolean(),
+    fingerprint: z.boolean(),
+    expire: z.boolean(),
+    ttl: durationSchema.refine((value) => durationSeconds(value) >= 60 && durationSeconds(value) <= 30 * 24 * 3600),
+  }),
   audit: z.object({ bufferSize: positiveInteger.max(262_144), batchSize: positiveInteger.max(4_096), flushInterval: auditFlushDuration })
     .refine((value) => value.batchSize <= value.bufferSize, { path: ["batchSize"] }),
   clientKeyDefaults: z.object({ rpmLimit: positiveInteger.max(100_000), maxConcurrent: positiveInteger.max(1_024) }),
@@ -136,6 +142,12 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       retryStatusCodesText: formatStatusCodeList(config.routing.retryStatusCodes ?? [402, 403, 429, 503]),
       retryServerErrors: config.routing.retryServerErrors ?? true,
     },
+    promptCacheAffinity: {
+      enabled: config.promptCacheAffinity?.enabled ?? true,
+      fingerprint: config.promptCacheAffinity?.fingerprint ?? true,
+      expire: config.promptCacheAffinity?.expire ?? true,
+      ttl: parseDuration(config.promptCacheAffinity?.ttl ?? "24h"),
+    },
     audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: parseDuration(config.audit.flushInterval) },
     clientKeyDefaults: config.clientKeyDefaults,
   };
@@ -163,6 +175,12 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       cooldownMax: formatDuration(config.routing.cooldownMax), capacityWait: formatDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
       retryStatusCodes: parseStatusCodeList(config.routing.retryStatusCodesText) ?? [402, 403, 429, 503],
       retryServerErrors: config.routing.retryServerErrors,
+    },
+    promptCacheAffinity: {
+      enabled: config.promptCacheAffinity.enabled,
+      fingerprint: config.promptCacheAffinity.fingerprint,
+      expire: config.promptCacheAffinity.expire,
+      ttl: formatDuration(config.promptCacheAffinity.ttl),
     },
     audit: { bufferSize: config.audit.bufferSize, batchSize: config.audit.batchSize, flushInterval: formatDuration(config.audit.flushInterval) },
     clientKeyDefaults: config.clientKeyDefaults,

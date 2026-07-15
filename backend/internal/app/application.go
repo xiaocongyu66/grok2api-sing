@@ -35,6 +35,7 @@ import (
 	redisruntime "github.com/chenyme/grok2api/backend/internal/infra/runtime/redis"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
 )
@@ -235,9 +236,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressService.SetRuntime(egressManager)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	// new-api style Redis token cache: multi-instance shared API key auth objects.
+	var affinityStore promptcache.Store = memory.NewAffinityStore()
 	if redisStore, ok := runtimeStore.(*redisruntime.Store); ok {
 		clientKeyService.SetTokenCache(redisruntime.NewTokenCache(redisStore))
+		affinityStore = redisruntime.NewAffinityStore(redisStore)
 	}
+	promptCacheAffinity := promptcache.NewResolver(affinityStore, promptcache.Policy{
+		Enabled: cfg.Routing.PromptCacheAffinity.Enabled, Fingerprint: cfg.Routing.PromptCacheAffinity.Fingerprint,
+		Expire: cfg.Routing.PromptCacheAffinity.Expire, TTL: cfg.Routing.PromptCacheAffinity.TTL.Value(),
+	})
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
 	dashboardService := dashboardapp.NewService(dashboardRepo)
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
@@ -280,6 +287,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
 		accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
+		promptCacheAffinity.UpdatePolicy(promptcache.Policy{
+			Enabled: next.Routing.PromptCacheAffinity.Enabled, Fingerprint: next.Routing.PromptCacheAffinity.Fingerprint,
+			Expire: next.Routing.PromptCacheAffinity.Expire, TTL: next.Routing.PromptCacheAffinity.TTL.Value(),
+		})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
 		gatewayService.UpdateRetryPolicy(next.Routing.RetryStatusCodes, next.Routing.RetryServerErrors)
 		auditService.UpdateConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value())
@@ -290,7 +301,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, PromptCacheAffinity: promptCacheAffinity})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,

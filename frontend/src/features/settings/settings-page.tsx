@@ -188,6 +188,24 @@ export function SettingsPage() {
             <p className="mt-1 text-xs text-muted-foreground">{t("settings.routing.retryHint")}</p>
           </SettingsSection>
 
+          <SettingsSection title={t("settings.promptCacheAffinity.title")}>
+            <p className="mb-3 text-xs text-muted-foreground">{t("settings.promptCacheAffinity.description")}</p>
+            <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
+              <SettingsField controlId="pca-enabled" label={t("settings.promptCacheAffinity.enabled")}>
+                <Controller control={form.control} name="promptCacheAffinity.enabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="pca-enabled" checked={field.value} onCheckedChange={field.onChange} /></div>} />
+              </SettingsField>
+              <SettingsField controlId="pca-fingerprint" label={t("settings.promptCacheAffinity.fingerprint")}>
+                <Controller control={form.control} name="promptCacheAffinity.fingerprint" render={({ field }) => <div className="flex h-8 items-center"><Switch id="pca-fingerprint" checked={field.value} onCheckedChange={field.onChange} /></div>} />
+              </SettingsField>
+              <SettingsField controlId="pca-expire" label={t("settings.promptCacheAffinity.expire")}>
+                <Controller control={form.control} name="promptCacheAffinity.expire" render={({ field }) => <div className="flex h-8 items-center"><Switch id="pca-expire" checked={field.value} onCheckedChange={field.onChange} /></div>} />
+              </SettingsField>
+              <SettingsField controlId="pca-ttl" label={t("settings.promptCacheAffinity.ttl")} error={form.formState.errors.promptCacheAffinity?.ttl?.message}>
+                <Controller control={form.control} name="promptCacheAffinity.ttl" render={({ field }) => <DurationInput id="pca-ttl" value={field.value} onChange={field.onChange} />} />
+              </SettingsField>
+            </div>
+          </SettingsSection>
+
           <SettingsSection title={t("settings.proactiveSync.title")}>
             <p className="mb-3 text-xs text-muted-foreground">{t("settings.proactiveSync.description")}</p>
             <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">

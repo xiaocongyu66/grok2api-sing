@@ -82,6 +82,14 @@ type RoutingConfig struct {
 	RetryServerErrors bool
 }
 
+// PromptCacheAffinityConfig is the admin-editable prompt-cache affinity policy.
+type PromptCacheAffinityConfig struct {
+	Enabled     bool
+	Fingerprint bool
+	Expire      bool
+	TTL         string
+}
+
 // AuditConfig 是管理接口使用的审计可编辑输入。
 type AuditConfig struct {
 	BufferSize    int
@@ -113,6 +121,7 @@ type EditableConfig struct {
 	Batch                 BatchConfig
 	Media                 MediaConfig
 	Routing               RoutingConfig
+	PromptCacheAffinity   PromptCacheAffinityConfig
 	Audit                 AuditConfig
 	ClientKeyDefaults     ClientKeyDefaultsConfig
 }
@@ -299,6 +308,18 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		AllowManualBillingRefresh: value.ProactiveUpstreamSync.AllowManualBillingRefresh,
 		AllowManualQuotaRefresh:   value.ProactiveUpstreamSync.AllowManualQuotaRefresh,
 	}
+	// Older persisted settings omit promptCacheAffinity (all-zero). Keep YAML/default policy.
+	pca := value.PromptCacheAffinity
+	if pca.TTL > 0 || pca.Enabled || pca.Fingerprint || pca.Expire {
+		affinityTTL := pca.TTL
+		if affinityTTL <= 0 {
+			affinityTTL = 24 * time.Hour
+		}
+		base.Routing.PromptCacheAffinity = config.PromptCacheAffinityConfig{
+			Enabled: pca.Enabled, Fingerprint: pca.Fingerprint,
+			Expire: pca.Expire, TTL: config.Duration(affinityTTL),
+		}
+	}
 	return base
 }
 
@@ -349,6 +370,10 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			ModelCatalogCatchup:       value.Provider.ProactiveUpstreamSync.ModelCatalogCatchup,
 			AllowManualBillingRefresh: value.Provider.ProactiveUpstreamSync.AllowManualBillingRefresh,
 			AllowManualQuotaRefresh:   value.Provider.ProactiveUpstreamSync.AllowManualQuotaRefresh,
+		},
+		PromptCacheAffinity: settingsdomain.PromptCacheAffinityConfig{
+			Enabled: value.Routing.PromptCacheAffinity.Enabled, Fingerprint: value.Routing.PromptCacheAffinity.Fingerprint,
+			Expire: value.Routing.PromptCacheAffinity.Expire, TTL: value.Routing.PromptCacheAffinity.TTL.Value(),
 		},
 	}
 }
@@ -435,6 +460,9 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		{"providerConsole.chatTimeout", input.ProviderConsole.ChatTimeout, func(value config.Duration) { next.Provider.Console.ChatTimeout = value }},
 		{"media.cleanupInterval", input.Media.CleanupInterval, func(value config.Duration) { next.Media.CleanupInterval = value }},
 		{"batch.randomDelay", input.Batch.RandomDelay, func(value config.Duration) { next.Batch.RandomDelay = value }},
+		{"promptCacheAffinity.ttl", input.PromptCacheAffinity.TTL, func(value config.Duration) {
+			next.Routing.PromptCacheAffinity.TTL = value
+		}},
 	}
 	for _, item := range durations {
 		value, err := time.ParseDuration(strings.TrimSpace(item.value))
@@ -443,6 +471,9 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		}
 		item.set(config.Duration(value))
 	}
+	next.Routing.PromptCacheAffinity.Enabled = input.PromptCacheAffinity.Enabled
+	next.Routing.PromptCacheAffinity.Fingerprint = input.PromptCacheAffinity.Fingerprint
+	next.Routing.PromptCacheAffinity.Expire = input.PromptCacheAffinity.Expire
 	config.NormalizeRoutingRetry(&next)
 	if err := next.Validate(); err != nil {
 		return config.Config{}, err
@@ -483,6 +514,10 @@ func toEditable(cfg config.Config) EditableConfig {
 			StickyTTL: cfg.Routing.StickyTTL.String(), CooldownBase: cfg.Routing.CooldownBase.String(),
 			CooldownMax: cfg.Routing.CooldownMax.String(), CapacityWait: cfg.Routing.CapacityWait.String(), MaxAttempts: cfg.Routing.MaxAttempts,
 			RetryStatusCodes: append([]int(nil), cfg.Routing.RetryStatusCodes...), RetryServerErrors: cfg.Routing.RetryServerErrors,
+		},
+		PromptCacheAffinity: PromptCacheAffinityConfig{
+			Enabled: cfg.Routing.PromptCacheAffinity.Enabled, Fingerprint: cfg.Routing.PromptCacheAffinity.Fingerprint,
+			Expire: cfg.Routing.PromptCacheAffinity.Expire, TTL: cfg.Routing.PromptCacheAffinity.TTL.String(),
 		},
 		Audit: AuditConfig{
 			BufferSize: cfg.Audit.BufferSize, BatchSize: cfg.Audit.BatchSize, FlushInterval: cfg.Audit.FlushInterval.String(),

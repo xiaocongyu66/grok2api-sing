@@ -180,6 +180,22 @@ type RoutingConfig struct {
 	RetryStatusCodes []int `yaml:"retryStatusCodes"`
 	// RetryServerErrors retries any status >= 500 when true (default).
 	RetryServerErrors bool `yaml:"retryServerErrors"`
+	// PromptCacheAffinity stabilizes x-grok-conv-id for upstream prompt-cache hits.
+	PromptCacheAffinity PromptCacheAffinityConfig `yaml:"promptCacheAffinity"`
+}
+
+// PromptCacheAffinityConfig controls automatic conversation affinity ids.
+// When a client omits session headers, the gateway can map client-key+IP+UA to a
+// stable id stored in Redis/memory so multi-turn requests share prompt cache.
+type PromptCacheAffinityConfig struct {
+	// Enabled master switch (default true).
+	Enabled bool `yaml:"enabled"`
+	// Fingerprint derives ids from IP/User-Agent/client key when no session header is present.
+	Fingerprint bool `yaml:"fingerprint"`
+	// Expire enables TTL on fingerprint mappings; false keeps mappings until manual clear.
+	Expire bool `yaml:"expire"`
+	// TTL is the mapping lifetime when Expire is true (default 24h).
+	TTL Duration `yaml:"ttl"`
 }
 
 // DefaultRetryStatusCodes matches historical gateway behavior for account-scoped failover.
@@ -483,6 +499,9 @@ func (c Config) Validate() error {
 	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL || c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown || c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > 5*time.Second || c.Routing.MaxAttempts < 1 || c.Routing.MaxAttempts > 10 {
 		return errors.New("routing 配置无效")
 	}
+	if c.Routing.PromptCacheAffinity.TTL.Value() < 0 || c.Routing.PromptCacheAffinity.TTL.Value() > 30*24*time.Hour {
+		return errors.New("routing.promptCacheAffinity.ttl 必须在 0 到 720h 之间")
+	}
 	if err := validateRetryStatusCodes(c.Routing.RetryStatusCodes); err != nil {
 		return err
 	}
@@ -555,6 +574,9 @@ func defaultConfig() Config {
 			MaxAttempts:       3,
 			RetryStatusCodes:  append([]int(nil), DefaultRetryStatusCodes...),
 			RetryServerErrors: true,
+			PromptCacheAffinity: PromptCacheAffinityConfig{
+				Enabled: true, Fingerprint: true, Expire: true, TTL: Duration(24 * time.Hour),
+			},
 		},
 		Audit:             AuditConfig{BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond)},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},

@@ -18,6 +18,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
@@ -44,20 +45,21 @@ type Dependencies struct {
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness    func(context.Context) ReadinessSnapshot
-	Ready        func(context.Context) bool
-	TrafficReady func() bool
-	AdminAuth    *adminauthapp.Service
-	Accounts     *accountapp.Service
-	AccountSync  *accountsyncapp.Service
-	Models       *modelapp.Service
-	ClientKeys   *clientkeyapp.Service
-	Audits       *auditapp.Service
-	Dashboard    *dashboardapp.Service
-	Gateway      *gateway.Service
-	Media        *mediaapp.Service
-	Settings     *settingsapp.Service
-	Egress       *egressapp.Service
+	Readiness           func(context.Context) ReadinessSnapshot
+	Ready               func(context.Context) bool
+	TrafficReady        func() bool
+	AdminAuth           *adminauthapp.Service
+	Accounts            *accountapp.Service
+	AccountSync         *accountsyncapp.Service
+	Models              *modelapp.Service
+	ClientKeys          *clientkeyapp.Service
+	Audits              *auditapp.Service
+	Dashboard           *dashboardapp.Service
+	Gateway             *gateway.Service
+	Media               *mediaapp.Service
+	Settings            *settingsapp.Service
+	Egress              *egressapp.Service
+	PromptCacheAffinity *promptcache.Resolver
 }
 
 type ReadinessComponent struct {
@@ -156,7 +158,9 @@ func New(deps Dependencies) *gin.Engine {
 		})
 	}
 	v1.Use(middleware.ClientAuth(deps.ClientKeys))
-	inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes).Register(v1)
+	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
+	inferenceHandler.SetPromptCacheAffinity(deps.PromptCacheAffinity)
+	inferenceHandler.Register(v1)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router
 }

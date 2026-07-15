@@ -13,6 +13,15 @@ type Config struct {
 	Routing               RoutingConfig
 	Audit                 AuditConfig
 	ClientKeyDefaults     ClientKeyDefaultsConfig
+	PromptCacheAffinity   PromptCacheAffinityConfig
+}
+
+// PromptCacheAffinityConfig is hot-reloadable xAI prompt-cache affinity policy.
+type PromptCacheAffinityConfig struct {
+	Enabled     bool
+	Fingerprint bool
+	Expire      bool
+	TTL         time.Duration
 }
 
 // ProactiveUpstreamSyncConfig toggles optional xAI billing/quota/model polling.
