@@ -24,6 +24,24 @@ type Usage struct {
 	BilledCostUSDTicks int64
 }
 
+// LiveRates is site-wide traffic over a short sliding window (new-api style).
+type LiveRates struct {
+	// RPM is request count in the last 60 seconds.
+	RPM int64
+	// TPM is total tokens in the last 60 seconds.
+	TPM int64
+	// WindowSeconds is the observation window (normally 60).
+	WindowSeconds int
+}
+
+// DayUsage is calendar-day totals in the admin timezone (00:00–now or full day).
+type DayUsage struct {
+	Requests int64
+	Tokens   int64
+	Start    string // RFC3339 for clarity in API
+	End      string
+}
+
 // Bucket 表示一个固定时间桶内的请求和 token 数量。
 type Bucket struct {
 	Index              int
@@ -60,6 +78,8 @@ type ModelBucket struct {
 type Aggregate struct {
 	Resources    Resources
 	Usage        Usage
+	LiveRates    LiveRates
+	Today        DayUsage
 	Buckets      []Bucket
 	TopModels    []ModelUsage
 	ModelBuckets []ModelBucket

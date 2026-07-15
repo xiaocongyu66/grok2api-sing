@@ -22,8 +22,23 @@ type responseDTO struct {
 	Range       rangeDTO        `json:"range"`
 	Resources   resourcesDTO    `json:"resources"`
 	Usage       usageDTO        `json:"usage"`
+	LiveRates   liveRatesDTO    `json:"liveRates"`
+	Today       dayUsageDTO     `json:"today"`
 	Series      []seriesDTO     `json:"series"`
 	TopModels   []modelUsageDTO `json:"topModels"`
+}
+
+type liveRatesDTO struct {
+	RPM           int64 `json:"rpm"`
+	TPM           int64 `json:"tpm"`
+	WindowSeconds int   `json:"windowSeconds"`
+}
+
+type dayUsageDTO struct {
+	Requests int64  `json:"requests"`
+	Tokens   int64  `json:"tokens"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
 }
 
 type rangeDTO struct {
@@ -85,13 +100,25 @@ type modelUsageDTO struct {
 }
 
 func (h *Handler) get(c *gin.Context) {
-	load := h.service.Get
+	period := c.Query("period")
+	timezone := c.Query("timezone")
+	start := c.Query("start")
+	end := c.Query("end")
+	var (
+		result dashboardapp.Result
+		err    error
+	)
 	if c.Query("refresh") == "1" {
-		load = h.service.Refresh
+		result, err = h.service.Refresh(c.Request.Context(), period, timezone, start, end)
+	} else {
+		result, err = h.service.Get(c.Request.Context(), period, timezone, start, end)
 	}
-	result, err := load(c.Request.Context(), c.Query("period"), c.Query("timezone"))
 	if errors.Is(err, dashboardapp.ErrInvalidPeriod) {
-		response.Error(c, http.StatusBadRequest, "invalidDashboardPeriod", "period 仅支持 24h、7d、30d、90d")
+		response.Error(c, http.StatusBadRequest, "invalidDashboardPeriod", "period 仅支持 24h、7d、30d、90d、custom")
+		return
+	}
+	if errors.Is(err, dashboardapp.ErrInvalidRange) {
+		response.Error(c, http.StatusBadRequest, "invalidDashboardRange", "自定义时间须在 2009-01-01 至 2030-12-31 之间，且结束时间晚于开始时间")
 		return
 	}
 	if errors.Is(err, dashboardapp.ErrInvalidTimezone) {
@@ -128,6 +155,8 @@ func (h *Handler) get(c *gin.Context) {
 			AllTimeRequests:  result.Resources.AllTimeRequests,
 		},
 		Usage:     usageDTO{Requests: result.Usage.Requests, SuccessfulRequests: result.Usage.SuccessfulRequests, FailedRequests: result.Usage.FailedRequests, InputTokens: result.Usage.InputTokens, CachedInputTokens: result.Usage.CachedInputTokens, OutputTokens: result.Usage.OutputTokens, ReasoningTokens: result.Usage.ReasoningTokens, Tokens: result.Usage.Tokens, BilledCostUSDTicks: result.Usage.BilledCostUSDTicks, SuccessRate: result.SuccessRate},
+		LiveRates: liveRatesDTO{RPM: result.LiveRates.RPM, TPM: result.LiveRates.TPM, WindowSeconds: result.LiveRates.WindowSeconds},
+		Today:     dayUsageDTO{Requests: result.Today.Requests, Tokens: result.Today.Tokens, Start: result.Today.Start, End: result.Today.End},
 		Series:    series,
 		TopModels: topModels,
 	})

@@ -62,7 +62,9 @@ func TestDashboardRepositorySnapshot(t *testing.T) {
 		}
 	}
 
-	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, testDashboardBoundaries(now.Add(-24*time.Hour), 2*time.Hour, 12), now)
+	boundaries := testDashboardBoundaries(now.Add(-24*time.Hour), 2*time.Hour, 12)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, boundaries, now, dayStart, now, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +91,47 @@ func TestDashboardRepositorySnapshot(t *testing.T) {
 	if len(snapshot.TopModels) != 2 || snapshot.TopModels[0].Model != "grok-primary" || snapshot.TopModels[0].Requests != 2 || snapshot.TopModels[0].Tokens != 110 {
 		t.Fatalf("top models = %#v", snapshot.TopModels)
 	}
+	// No audits in the last 60s → live rates zero; today window is calendar day midnight→now.
+	if snapshot.LiveRates.RPM != 0 || snapshot.LiveRates.TPM != 0 || snapshot.LiveRates.WindowSeconds != 60 {
+		t.Fatalf("liveRates = %#v", snapshot.LiveRates)
+	}
+	// Audits at -1h and -2h fall inside today (midnight→now); -23h is previous day.
+	if snapshot.Today.Requests != 2 || snapshot.Today.Tokens != 60 {
+		t.Fatalf("today = %#v", snapshot.Today)
+	}
+}
+
+func TestDashboardRepositoryLiveRatesWindow(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "dashboard-live.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	rows := []requestAuditModel{
+		{RequestID: "live-1", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 100, CreatedAt: now.Add(-30 * time.Second)},
+		{RequestID: "live-2", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 50, CreatedAt: now.Add(-10 * time.Second)},
+		{RequestID: "old", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 999, CreatedAt: now.Add(-2 * time.Minute)},
+	}
+	if err := database.db.WithContext(ctx).Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	boundaries := testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, boundaries, now, dayStart, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.LiveRates.RPM != 2 || snapshot.LiveRates.TPM != 150 || snapshot.LiveRates.WindowSeconds != 60 {
+		t.Fatalf("liveRates = %#v", snapshot.LiveRates)
+	}
+	if snapshot.Today.Requests != 3 || snapshot.Today.Tokens != 1149 {
+		t.Fatalf("today = %#v", snapshot.Today)
+	}
 }
 
 func TestDashboardRepositoryRanksTopModels(t *testing.T) {
@@ -110,7 +153,9 @@ func TestDashboardRepositoryRanksTopModels(t *testing.T) {
 	if err := database.db.WithContext(ctx).Create(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24), now)
+	boundaries := testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, boundaries, now, dayStart, now, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

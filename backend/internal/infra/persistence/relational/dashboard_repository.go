@@ -15,7 +15,7 @@ type DashboardRepository struct{ db *Database }
 func NewDashboardRepository(db *Database) *DashboardRepository { return &DashboardRepository{db: db} }
 
 // Snapshot 在同一数据库事务内读取资源计数和指定区间的审计聚合。
-func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []time.Time, snapshotAt time.Time) (dashboarddomain.Aggregate, error) {
+func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []time.Time, snapshotAt, todayStart, todayEnd time.Time, liveWindow time.Duration) (dashboarddomain.Aggregate, error) {
 	if len(bucketBoundaries) < 2 {
 		return dashboarddomain.Aggregate{}, fmt.Errorf("Dashboard 聚合范围无效")
 	}
@@ -23,6 +23,15 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []t
 		if !bucketBoundaries[index-1].Before(bucketBoundaries[index]) {
 			return dashboarddomain.Aggregate{}, fmt.Errorf("Dashboard 时间桶无效")
 		}
+	}
+	if liveWindow <= 0 {
+		liveWindow = time.Minute
+	}
+	if todayEnd.IsZero() {
+		todayEnd = snapshotAt
+	}
+	if todayStart.IsZero() {
+		todayStart = snapshotAt.Add(-24 * time.Hour)
 	}
 	start := bucketBoundaries[0]
 	end := bucketBoundaries[len(bucketBoundaries)-1]
@@ -74,6 +83,36 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []t
 			Where("created_at >= ? AND created_at < ?", start, end).
 			Scan(&result.Usage).Error; err != nil {
 			return err
+		}
+
+		// new-api style: site-wide RPM/TPM over the last liveWindow (default 60s).
+		liveStart := snapshotAt.Add(-liveWindow)
+		var live struct {
+			RPM int64
+			TPM int64
+		}
+		if err := tx.Model(&requestAuditModel{}).
+			Select("COUNT(*) AS rpm, COALESCE(SUM(total_tokens), 0) AS tpm").
+			Where("created_at >= ? AND created_at < ?", liveStart, snapshotAt).
+			Scan(&live).Error; err != nil {
+			return err
+		}
+		result.LiveRates = dashboarddomain.LiveRates{RPM: live.RPM, TPM: live.TPM, WindowSeconds: int(liveWindow / time.Second)}
+
+		// Calendar-day totals in admin timezone (passed as todayStart/todayEnd).
+		var today struct {
+			Requests int64
+			Tokens   int64
+		}
+		if err := tx.Model(&requestAuditModel{}).
+			Select("COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens").
+			Where("created_at >= ? AND created_at < ?", todayStart, todayEnd).
+			Scan(&today).Error; err != nil {
+			return err
+		}
+		result.Today = dashboarddomain.DayUsage{
+			Requests: today.Requests, Tokens: today.Tokens,
+			Start: todayStart.UTC().Format(time.RFC3339), End: todayEnd.UTC().Format(time.RFC3339),
 		}
 
 		var buckets []struct {

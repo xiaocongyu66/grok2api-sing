@@ -19,7 +19,7 @@ func TestGetBuildsStableBucketsAndSuccessRate(t *testing.T) {
 	service := NewService(repository)
 	service.now = func() time.Time { return now }
 
-	result, err := service.Get(context.Background(), "24h", "UTC")
+	result, err := service.Get(context.Background(), "24h", "UTC", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestGetUsesPeriodSpecificBucketCounts(t *testing.T) {
 	for period, expected := range map[string]int{"24h": 24, "7d": 7, "30d": 30, "90d": 6} {
 		repository := &dashboardRepositoryStub{}
 		service := NewService(repository)
-		if _, err := service.Get(context.Background(), period, "UTC"); err != nil {
+		if _, err := service.Get(context.Background(), period, "UTC", "", ""); err != nil {
 			t.Fatalf("period %s: %v", period, err)
 		}
 		if repository.bucketCount != expected {
@@ -61,10 +61,10 @@ func TestGetCachesRepeatedAggregate(t *testing.T) {
 	service := NewService(repository)
 	service.now = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
 
-	if _, err := service.Get(context.Background(), "24h", "UTC"); err != nil {
+	if _, err := service.Get(context.Background(), "24h", "UTC", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Get(context.Background(), "24h", "UTC"); err != nil {
+	if _, err := service.Get(context.Background(), "24h", "UTC", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if repository.calls != 1 {
@@ -77,10 +77,10 @@ func TestRefreshBypassesAggregateCache(t *testing.T) {
 	service := NewService(repository)
 	service.now = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
 
-	if _, err := service.Get(context.Background(), "24h", "UTC"); err != nil {
+	if _, err := service.Get(context.Background(), "24h", "UTC", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Refresh(context.Background(), "24h", "UTC"); err != nil {
+	if _, err := service.Refresh(context.Background(), "24h", "UTC", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if repository.calls != 2 {
@@ -95,7 +95,7 @@ func TestGetAlignsDailyBucketsToCalendarDays(t *testing.T) {
 	service := NewService(repository)
 	service.now = func() time.Time { return now }
 
-	result, err := service.Get(context.Background(), "7d", "Asia/Shanghai")
+	result, err := service.Get(context.Background(), "7d", "Asia/Shanghai", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestGetUsesFifteenDayBucketsFor90Days(t *testing.T) {
 	service := NewService(&dashboardRepositoryStub{})
 	service.now = func() time.Time { return now }
 
-	result, err := service.Get(context.Background(), "90d", "UTC")
+	result, err := service.Get(context.Background(), "90d", "UTC", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestGetUsesFifteenDayBucketsFor90Days(t *testing.T) {
 
 func TestGetRejectsUnknownPeriod(t *testing.T) {
 	service := NewService(&dashboardRepositoryStub{})
-	if _, err := service.Get(context.Background(), "365d", "UTC"); err != ErrInvalidPeriod {
+	if _, err := service.Get(context.Background(), "365d", "UTC", "", ""); err != ErrInvalidPeriod {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestGetUsesCalendarBoundariesAcrossDST(t *testing.T) {
 	service := NewService(&dashboardRepositoryStub{})
 	service.now = func() time.Time { return now }
 
-	result, err := service.Get(context.Background(), "7d", "America/New_York")
+	result, err := service.Get(context.Background(), "7d", "America/New_York", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,8 +154,97 @@ func TestGetUsesCalendarBoundariesAcrossDST(t *testing.T) {
 
 func TestGetRejectsInvalidTimezone(t *testing.T) {
 	service := NewService(&dashboardRepositoryStub{})
-	if _, err := service.Get(context.Background(), "24h", "Mars/Olympus"); err != ErrInvalidTimezone {
+	if _, err := service.Get(context.Background(), "24h", "Mars/Olympus", "", ""); err != ErrInvalidTimezone {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestGetCustomRangeBuildsSeriesAndPassesLiveWindow(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	repository := &dashboardRepositoryStub{
+		aggregate: dashboarddomain.Aggregate{
+			LiveRates: dashboarddomain.LiveRates{RPM: 3, TPM: 900, WindowSeconds: 60},
+			Today:     dashboarddomain.DayUsage{Requests: 12, Tokens: 4000, Start: "2026-07-15T00:00:00Z", End: "2026-07-15T12:00:00Z"},
+			Usage:     dashboarddomain.Usage{Requests: 100, SuccessfulRequests: 90, FailedRequests: 10, Tokens: 50000},
+		},
+	}
+	service := NewService(repository)
+	service.now = func() time.Time { return now }
+
+	result, err := service.Get(context.Background(), "custom", "UTC", "2020-01-01", "2020-01-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Period != PeriodCustom {
+		t.Fatalf("period = %s", result.Period)
+	}
+	if len(result.Series) == 0 {
+		t.Fatal("expected custom series buckets")
+	}
+	if !result.Range.Start.Equal(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("start = %v", result.Range.Start)
+	}
+	// date-only end is exclusive next day
+	if !result.Range.End.Equal(time.Date(2020, 1, 4, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("end = %v", result.Range.End)
+	}
+	if repository.liveWindow != time.Minute {
+		t.Fatalf("liveWindow = %s", repository.liveWindow)
+	}
+	if result.LiveRates.RPM != 3 || result.LiveRates.TPM != 900 {
+		t.Fatalf("liveRates = %#v", result.LiveRates)
+	}
+	if result.Today.Requests != 12 || result.Today.Tokens != 4000 {
+		t.Fatalf("today = %#v", result.Today)
+	}
+	dayStart := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	if !repository.todayStart.Equal(dayStart) || !repository.todayEnd.Equal(now) {
+		t.Fatalf("today window = %v .. %v", repository.todayStart, repository.todayEnd)
+	}
+}
+
+func TestGetCustomRangeRejectsOutOfBounds(t *testing.T) {
+	service := NewService(&dashboardRepositoryStub{})
+	service.now = func() time.Time { return time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC) }
+	cases := []struct {
+		start, end string
+	}{
+		{"2008-12-31", "2010-01-01"},
+		{"2020-01-01", "2031-01-01"},
+		{"2020-01-02", "2020-01-01"},
+		{"", "2020-01-01"},
+	}
+	for _, tc := range cases {
+		if _, err := service.Get(context.Background(), "custom", "UTC", tc.start, tc.end); err != ErrInvalidRange {
+			t.Fatalf("start=%s end=%s err=%v", tc.start, tc.end, err)
+		}
+	}
+}
+
+func TestGetCustomRangeAcceptsRFC3339AndBounds(t *testing.T) {
+	service := NewService(&dashboardRepositoryStub{})
+	service.now = func() time.Time { return time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC) }
+	result, err := service.Get(context.Background(), "custom", "UTC", "2009-01-01T00:00:00Z", "2030-12-31T23:59:59Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Period != PeriodCustom || len(result.Series) == 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	// Date-only end of 2030-12-31 is exclusive 2031-01-01 and must cover full span.
+	result, err = service.Get(context.Background(), "custom", "UTC", "2009-01-01", "2030-12-31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEnd := time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !result.Range.Start.Equal(time.Date(2009, 1, 1, 0, 0, 0, 0, time.UTC)) || !result.Range.End.Equal(wantEnd) {
+		t.Fatalf("range = %#v", result.Range)
+	}
+	if len(result.Series) == 0 || len(result.Series) > 120 {
+		t.Fatalf("series len = %d", len(result.Series))
+	}
+	if !result.Series[len(result.Series)-1].End.Equal(wantEnd) {
+		t.Fatalf("last series end = %v", result.Series[len(result.Series)-1].End)
 	}
 }
 
@@ -163,10 +252,16 @@ type dashboardRepositoryStub struct {
 	aggregate   dashboarddomain.Aggregate
 	bucketCount int
 	calls       int
+	liveWindow  time.Duration
+	todayStart  time.Time
+	todayEnd    time.Time
 }
 
-func (s *dashboardRepositoryStub) Snapshot(_ context.Context, boundaries []time.Time, _ time.Time) (dashboarddomain.Aggregate, error) {
+func (s *dashboardRepositoryStub) Snapshot(_ context.Context, boundaries []time.Time, _ time.Time, todayStart, todayEnd time.Time, liveWindow time.Duration) (dashboarddomain.Aggregate, error) {
 	s.calls++
 	s.bucketCount = len(boundaries) - 1
+	s.liveWindow = liveWindow
+	s.todayStart = todayStart
+	s.todayEnd = todayEnd
 	return s.aggregate, nil
 }
