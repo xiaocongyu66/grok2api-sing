@@ -218,10 +218,8 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	}
 	userAgent := ""
 	if scope != domain.ScopeBuild {
-		userAgent = strings.TrimSpace(selected.UserAgent)
-	}
-	if scope != domain.ScopeBuild && userAgent == "" {
-		userAgent = DefaultUserAgent
+		// Fixed UA, empty→default, or "random"→pick from pool for this lease.
+		userAgent = ResolveBrowserUserAgent(selected.UserAgent)
 	}
 	client, err := m.clientFor(selected.ID, scope, proxyURL, userAgent, cookies)
 	if err != nil {
@@ -328,7 +326,13 @@ func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, 
 	if scope == domain.ScopeBuild {
 		clientKind = "build"
 	}
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent+"\x00"+cookies)))
+	// Browser UA is applied per-request by callers from Lease.UserAgent; exclude it
+	// from the TLS client fingerprint so random-UA mode does not thrash the cache.
+	fingerprintMaterial := clientKind + "\x00" + proxyURL + "\x00" + cookies
+	if scope == domain.ScopeBuild {
+		fingerprintMaterial = clientKind + "\x00" + proxyURL + "\x00" + userAgent + "\x00" + cookies
+	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(fingerprintMaterial)))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cached, ok := m.clients[id]; ok && cached.fingerprint == fingerprint {

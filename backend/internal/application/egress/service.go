@@ -16,6 +16,9 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
+// RandomUserAgentToken is persisted when the admin enables per-request UA rotation.
+const RandomUserAgentToken = "random"
+
 var (
 	ErrInvalidInput = errors.New("代理节点参数无效")
 	ErrInvalidSort  = errors.New("代理节点排序条件无效")
@@ -401,20 +404,9 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		value.UserAgent = ""
 		value.EncryptedCloudflareCookie = ""
 	} else {
-		value.UserAgent = strings.TrimSpace(input.UserAgent)
-		if value.UserAgent == "" {
-			s.mu.RLock()
-			// Prefer web UA when multiple non-build scopes are selected.
-			uaScope := primary
-			for _, scope := range scopes {
-				if scope != domain.ScopeBuild {
-					uaScope = scope
-					break
-				}
-			}
-			value.UserAgent = s.defaultUserAgent(uaScope)
-			s.mu.RUnlock()
-		}
+		// empty = default at request time; "random"/"auto" = rotate pool per lease; else fixed UA.
+		ua := normalizeStoredUserAgent(input.UserAgent)
+		value.UserAgent = ua
 	}
 	if len(value.UserAgent) > 512 {
 		return domain.Node{}, fmt.Errorf("%w: User-Agent 过长", ErrInvalidInput)
@@ -463,6 +455,23 @@ func (s *Service) defaultUserAgent(scope domain.Scope) string {
 	return s.webUA
 }
 
+func isRandomUserAgent(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case RandomUserAgentToken, "auto", "randomize", "__random__":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeStoredUserAgent(value string) string {
+	value = strings.TrimSpace(value)
+	if isRandomUserAgent(value) {
+		return RandomUserAgentToken
+	}
+	return value
+}
+
 func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 	scopes := value.EffectiveScopes()
 	primary := value.Scope
@@ -480,9 +489,14 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 			protocol = ProxyProtocolLabel(plain)
 		}
 	}
+	// Expose stored mode to admin UI ("random" or fixed UA); do not expand random here.
+	displayUA := userAgent
+	if isRandomUserAgent(value.UserAgent) {
+		displayUA = RandomUserAgentToken
+	}
 	node := domain.PublicNode{
 		ID: value.ID, Name: value.Name, Scope: primary, Scopes: scopes, Enabled: value.Enabled,
-		ProxyConfigured: proxyConfigured, ProxyProtocol: protocol, UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
+		ProxyConfigured: proxyConfigured, ProxyProtocol: protocol, UserAgent: displayUA, CookieConfigured: value.EncryptedCloudflareCookie != "",
 		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: LocalizeEgressError(value.LastError),
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
