@@ -19,7 +19,9 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: chenyme/grok2api
+  # GHCR image under the repository owner (xiaocongyu66/grok2api-sing).
+  IMAGE_NAME: ${{ github.repository }}
+  SINGBOX_TAGS: with_gvisor,with_quic,with_wireguard,with_utls
 
 jobs:
   verify:
@@ -37,11 +39,15 @@ jobs:
 
       - name: Test backend
         working-directory: backend
-        run: go test ./...
+        run: go test -tags "${{ env.SINGBOX_TAGS }}" ./...
 
       - name: Vet backend
         working-directory: backend
-        run: go vet ./...
+        run: go vet -tags "${{ env.SINGBOX_TAGS }}" ./...
+
+      - name: Build backend
+        working-directory: backend
+        run: go build -tags "${{ env.SINGBOX_TAGS }}" -o /tmp/grok2api ./cmd/grok2api
 
       - name: Verify Swagger document
         run: |
@@ -113,6 +119,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            SINGBOX_TAGS=${{ env.SINGBOX_TAGS }}
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
           provenance: mode=max

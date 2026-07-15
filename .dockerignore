@@ -11,6 +11,11 @@ backend/**/*_test.go
 !backend/docs/
 !backend/docs/docs.go
 
+# Vendored full SagerNet/sing-box tree (go.mod replace path).
+!third_party/
+!third_party/sing-box/
+!third_party/sing-box/**
+
 !frontend/
 !frontend/package.json
 !frontend/pnpm-lock.yaml
