@@ -213,7 +213,7 @@ func (s *Service) ListCursor(ctx context.Context, rawCursor string, pageSize int
 	if filter.Sort.Field == "" && filter.Sort.Direction == "" {
 		filter.Sort = repository.SortQuery{Field: "createdAt", Direction: repository.SortDescending}
 	}
-	if !validAuditFilter(filter.Status, "", "success", "clientError", "serverError", "2xx", "4xx", "5xx") || !validAuditFilter(filter.Mode, "", "stream", "nonStream") || !repository.IsValidSort(filter.Sort, "request", "model", "billing", "tokens", "status", "mode", "duration", "createdAt") {
+	if !validAuditFilter(filter.Status, "", "success", "clientError", "serverError", "2xx", "4xx", "5xx") || !validAuditFilter(filter.Mode, "", "stream", "nonStream") || !repository.IsValidSort(filter.Sort, "request", "key", "model", "billing", "tokens", "status", "mode", "duration", "createdAt") {
 		return CursorResult{}, ErrInvalidFilter
 	}
 	cursor, err := decodeAuditCursor(rawCursor, filter.Sort)
@@ -270,7 +270,7 @@ func encodeAuditCursor(value auditdomain.Record, sort repository.SortQuery) (str
 
 func parseAuditCursorValue(field, value string) (any, error) {
 	switch field {
-	case "request", "model":
+	case "request", "key", "model":
 		return value, nil
 	case "billing", "tokens", "status", "mode", "duration":
 		return strconv.ParseInt(value, 10, 64)
@@ -285,6 +285,8 @@ func formatAuditCursorValue(value auditdomain.Record, field string) string {
 	switch field {
 	case "request":
 		return value.RequestID
+	case "key":
+		return strings.ToLower(strings.TrimSpace(value.ClientKeyName))
 	case "model":
 		return strings.ToLower(value.ModelPublicID)
 	case "billing":

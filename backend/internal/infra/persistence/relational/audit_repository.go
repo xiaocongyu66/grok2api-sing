@@ -220,6 +220,7 @@ func (r *AuditRepository) ListCursor(ctx context.Context, input repository.Audit
 	query = applyAuditQuery(query, input.Search, input.Start, input.End, input.Filter)
 	fields := map[string]sortSpec{
 		"request":   {expression: "request_audits.request_id"},
+		"key":       {expression: "LOWER(COALESCE(request_audits.client_key_name, ''))"},
 		"model":     {expression: "LOWER(request_audits.model_public_id)"},
 		"billing":   {expression: "CASE WHEN request_audits.cost_in_usd_ticks > 0 THEN request_audits.cost_in_usd_ticks ELSE request_audits.estimated_cost_in_usd_ticks END", defaultDirection: repository.SortDescending},
 		"tokens":    {expression: "request_audits.total_tokens", defaultDirection: repository.SortDescending},

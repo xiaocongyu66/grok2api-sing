@@ -153,20 +153,22 @@ export function RequestAuditsPage() {
         {auditsQuery.isError ? <ErrorState message={auditsQuery.error.message} onRetry={() => void auditsQuery.refetch()} /> : null}
         {result && result.items.length === 0 ? <EmptyState /> : null}
         {auditsQuery.isPending || (result && result.items.length > 0) ? (
-          <Table className="min-w-[1160px] table-fixed text-xs">
+          <Table className="min-w-[1280px] table-fixed text-xs">
             <colgroup>
+              <col className="w-[13%]" />
+              <col className="w-[12%]" />
               <col className="w-[14%]" />
-              <col className="w-[14%]" />
-              <col className="w-[10%]" />
-              <col className="w-[26%]" />
-              <col className="w-[8%]" />
-              <col className="w-[10%]" />
+              <col className="w-[9%]" />
+              <col className="w-[22%]" />
               <col className="w-[7%]" />
-              <col className="w-[11%]" />
+              <col className="w-[9%]" />
+              <col className="w-[6%]" />
+              <col className="w-[8%]" />
             </colgroup>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <SortableTableHead field="request" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("audits.request")}</SortableTableHead>
+                <SortableTableHead field="key" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("audits.key")}</SortableTableHead>
                 <SortableTableHead field="model" sortBy={sort.field} sortOrder={sort.order} onSort={changeSort}>{t("audits.model")}</SortableTableHead>
                 <SortableTableHead field="billing" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" onSort={changeSort}>{t("audits.billing")}</SortableTableHead>
                 <SortableTableHead field="tokens" sortBy={sort.field} sortOrder={sort.order} initialOrder="desc" onSort={changeSort}>{t("audits.tokens")}</SortableTableHead>
@@ -177,17 +179,20 @@ export function RequestAuditsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {auditsQuery.isPending ? <TableLoadingRow colSpan={8} /> : result?.items.map((audit) => (
+              {auditsQuery.isPending ? <TableLoadingRow colSpan={9} /> : result?.items.map((audit) => (
                 <TableRow key={audit.id}>
                   <TableCell className="py-3">
                     <span className="block truncate text-xs" title={audit.requestId}>{audit.requestId}</span>
+                  </TableCell>
+                  <TableCell className="py-3">
+                    <ClientKeyValue name={audit.clientKeyName} id={audit.clientKeyId} />
                   </TableCell>
                   <TableCell className="py-3">
                     <ModelRouteValue
                       model={audit.modelPublicId || `#${audit.modelRouteId}`}
                       upstreamModel={audit.modelUpstreamModel || "-"}
                       account={audit.accountName || (audit.accountId ? `#${audit.accountId}` : "-")}
-                      clientKey={audit.clientKeyName || `#${audit.clientKeyId}`}
+                      clientKey={formatClientKeyLabel(audit.clientKeyName, audit.clientKeyId)}
                     />
                   </TableCell>
                   <TableCell className="py-3"><BillingValue audit={audit} /></TableCell>
@@ -256,6 +261,25 @@ function AuditTokenMetric({ icon: Icon, label, value, loading }: { icon: LucideI
     <div className="flex min-h-12 min-w-0 items-center justify-between gap-3 rounded-lg bg-muted/55 px-4 py-2">
       <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground"><Icon className="size-3.5 shrink-0" />{label}</span>
       <span className="flex min-h-5 min-w-8 items-center justify-end truncate text-sm font-medium tabular-nums" title={loading ? undefined : value}>{loading ? <Spinner className="size-3.5" /> : value}</span>
+    </div>
+  );
+}
+
+function formatClientKeyLabel(name: string | undefined, id: string): string {
+  const trimmed = name?.trim() ?? "";
+  if (trimmed) return trimmed;
+  return id ? `#${id}` : "-";
+}
+
+function ClientKeyValue({ name, id }: { name?: string; id: string }) {
+  const label = formatClientKeyLabel(name, id);
+  const subtitle = id ? `ID ${id}` : "";
+  return (
+    <div className="min-w-0">
+      <span className="block truncate text-xs font-medium" title={label}>{label}</span>
+      {subtitle ? (
+        <span className="mt-0.5 block truncate text-[11px] tabular-nums text-muted-foreground" title={subtitle}>{subtitle}</span>
+      ) : null}
     </div>
   );
 }
