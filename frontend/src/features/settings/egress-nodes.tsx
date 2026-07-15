@@ -17,7 +17,7 @@ import { createEgressNode, deleteEgressNode, listEgressNodes, updateEgressNode, 
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
 import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 
-const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", enabled: true, proxyURL: "", userAgent: "", cloudflareCookies: "" };
+const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", scopes: ["grok_build"], enabled: true, proxyURL: "", userAgent: "", cloudflareCookies: "" };
 
 export function EgressNodes() {
   const { t } = useTranslation();
@@ -28,11 +28,14 @@ export function EgressNodes() {
   const query = useQuery({ queryKey: ["egress-nodes", sort.field, sort.order], queryFn: () => listEgressNodes({ sortBy: sort.field || undefined, sortOrder: sort.field ? sort.order : undefined }) });
   const save = useMutation({
     mutationFn: () => {
+      const scopes = form.scopes?.length ? form.scopes : [form.scope];
       const input = {
         ...form,
+        scopes,
+        scope: scopes[0],
         proxyURL: form.proxyURL?.trim() || undefined,
-        userAgent: form.scope === "grok_build" ? "" : form.userAgent,
-        cloudflareCookies: form.scope === "grok_build" ? undefined : form.cloudflareCookies?.trim() || undefined,
+        userAgent: scopes.every((s) => s === "grok_build") ? "" : form.userAgent,
+        cloudflareCookies: scopes.every((s) => s === "grok_build") ? undefined : form.cloudflareCookies?.trim() || undefined,
       };
       return editing ? updateEgressNode(editing.id, input) : createEgressNode(input);
     },
@@ -51,16 +54,26 @@ export function EgressNodes() {
   }
 
   function openEdit(node: EgressNodeDTO) {
-    setForm({ name: node.name, scope: node.scope, enabled: node.enabled, userAgent: node.scope === "grok_build" ? "" : node.userAgent, proxyURL: "", cloudflareCookies: "" });
+    const scopes = node.scopes?.length ? node.scopes : [node.scope];
+    setForm({
+      name: node.name,
+      scope: scopes[0],
+      scopes,
+      enabled: node.enabled,
+      userAgent: scopes.every((s) => s === "grok_build") ? "" : node.userAgent,
+      proxyURL: "",
+      cloudflareCookies: "",
+    });
     setEditing(node);
   }
 
   function changeScope(scope: EgressScope) {
-    const previousDefault = query.data?.defaultUserAgents[form.scope] ?? "";
+    const previousDefault = query.data?.defaultUserAgents[form.scopes?.[0] ?? form.scope] ?? "";
     const nextDefault = query.data?.defaultUserAgents[scope] ?? "";
     setForm({
       ...form,
       scope,
+      scopes: [scope],
       userAgent: scope === "grok_build" ? "" : (form.userAgent === "" || form.userAgent === previousDefault ? nextDefault : form.userAgent),
       cloudflareCookies: scope === "grok_build" ? "" : form.cloudflareCookies,
     });
@@ -100,13 +113,16 @@ export function EgressNodes() {
             {nodes.length === 0 ? <TableRow><TableCell colSpan={6} className="h-20 text-center text-xs text-muted-foreground">{t("settings.egress.directFallback")}</TableCell></TableRow> : nodes.map((node) => (
               <TableRow className="group" key={node.id}>
                 <TableCell className="min-w-0"><div className="truncate text-xs font-medium">{node.name}</div>{node.lastError ? <div className="mt-0.5 truncate text-[11px] text-destructive" title={node.lastError}>{node.lastError}</div> : null}</TableCell>
-                <TableCell className="text-center"><Badge variant="outline" className="max-w-full truncate">{scopeLabel(node.scope)}</Badge></TableCell>
+                <TableCell className="min-w-0">
+                  <div className="flex flex-wrap justify-center gap-1">
+                    {(node.scopes?.length ? node.scopes : [node.scope]).map((scope) => (
+                      <Badge key={scope} variant="outline" className="font-normal">{scopeLabel(scope)}</Badge>
+                    ))}
+                  </div>
+                </TableCell>
                 <TableCell className="text-center">
                   {node.proxyConfigured ? (
-                    <div className="flex flex-col items-center gap-0.5">
-                      <Badge variant="secondary" className="font-mono text-[11px] uppercase tracking-wide">{node.proxyProtocol || t("proxies.protocolUnknown")}</Badge>
-                      <span className="text-[11px] text-muted-foreground">{t("settings.egress.configured")}</span>
-                    </div>
+                    <Badge variant="secondary" className="font-mono text-[11px] uppercase tracking-wide">{node.proxyProtocol || t("proxies.protocolUnknown")}</Badge>
                   ) : (
                     <span className="text-xs text-muted-foreground">{t("settings.egress.direct")}</span>
                   )}

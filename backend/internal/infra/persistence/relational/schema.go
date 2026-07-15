@@ -119,7 +119,12 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if strings.Contains(definition, "grok_console") {
+			// Egress scopes may be multi-value (comma-separated); recreate any old single-value IN(...) check.
+			if value.name == "chk_egress_nodes_specific_scope" {
+				if strings.Contains(definition, "length(trim(scope))") || strings.Contains(definition, "length(trim(scope)) BETWEEN") {
+					continue
+				}
+			} else if strings.Contains(definition, "grok_console") {
 				continue
 			}
 			if definition != "" {
@@ -130,6 +135,11 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 			if err := db.Migrator().CreateConstraint(value.model, value.name); err != nil {
 				return fmt.Errorf("创建约束 %s: %w", value.name, err)
 			}
+		}
+		// Multi-scope values need a wider scope column (was size 32).
+		if err := db.Migrator().AlterColumn(&egressNodeModel{}, "Scope"); err != nil {
+			// Best-effort: older dialects may already match or refuse noop alters.
+			_ = err
 		}
 		return nil
 	}

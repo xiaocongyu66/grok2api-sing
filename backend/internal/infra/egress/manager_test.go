@@ -152,7 +152,7 @@ func TestWebForbiddenStillRebuildsBrowserSession(t *testing.T) {
 	}
 	lease.Release()
 	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
-	if repository.updates != 1 || repository.node.Health >= 1 || repository.node.LastError != "anti-bot rejection" {
+	if repository.updates != 1 || repository.node.Health >= 1 || repository.node.LastError != "疑似反爬拒绝（403）" {
 		t.Fatalf("web 403 feedback = updates=%d node=%#v", repository.updates, repository.node)
 	}
 	if _, exists := manager.clients[1]; exists {

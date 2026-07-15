@@ -23,6 +23,8 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-nodes/report", h.report)
 	router.POST("/egress-nodes/test", h.testAll)
 	router.POST("/egress-nodes/batch", h.createBatch)
+	router.POST("/egress-nodes/batch-enabled", h.batchEnabled)
+	router.POST("/egress-nodes/batch-clear-errors", h.batchClearErrors)
 	router.POST("/egress-nodes/:id/test", h.testOne)
 	router.POST("/egress-nodes", h.create)
 	router.PUT("/egress-nodes/:id", h.update)
@@ -30,20 +32,22 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type nodeRequest struct {
-	Name              string  `json:"name"`
-	Scope             string  `json:"scope"`
-	Enabled           bool    `json:"enabled"`
-	ProxyURL          *string `json:"proxyURL"`
-	ClearProxyURL     bool    `json:"clearProxyURL"`
-	UserAgent         string  `json:"userAgent"`
-	CloudflareCookies *string `json:"cloudflareCookies"`
-	ClearCookies      bool    `json:"clearCookies"`
+	Name              string   `json:"name"`
+	Scope             string   `json:"scope"`
+	Scopes            []string `json:"scopes"`
+	Enabled           bool     `json:"enabled"`
+	ProxyURL          *string  `json:"proxyURL"`
+	ClearProxyURL     bool     `json:"clearProxyURL"`
+	UserAgent         string   `json:"userAgent"`
+	CloudflareCookies *string  `json:"cloudflareCookies"`
+	ClearCookies      bool     `json:"clearCookies"`
 }
 
 type batchNodeRequest struct {
 	NamePrefix        string   `json:"namePrefix"`
 	Name              string   `json:"name"` // alias for namePrefix
 	Scope             string   `json:"scope"`
+	Scopes            []string `json:"scopes"`
 	Enabled           *bool    `json:"enabled"`
 	ProxyURLs         []string `json:"proxyURLs"`
 	ProxyText         string   `json:"proxyText"` // multiline paste
@@ -51,10 +55,16 @@ type batchNodeRequest struct {
 	CloudflareCookies *string  `json:"cloudflareCookies"`
 }
 
+type batchIDsRequest struct {
+	IDs     []string `json:"ids"`
+	Enabled *bool    `json:"enabled"`
+}
+
 type nodeResponse struct {
 	ID               uint64     `json:"id,string"`
 	Name             string     `json:"name"`
 	Scope            string     `json:"scope"`
+	Scopes           []string   `json:"scopes"`
 	Enabled          bool       `json:"enabled"`
 	ProxyConfigured  bool       `json:"proxyConfigured"`
 	ProxyProtocol    string     `json:"proxyProtocol,omitempty"`
@@ -102,10 +112,25 @@ type probeResponse struct {
 
 func (value nodeRequest) input() egressapp.Input {
 	return egressapp.Input{
-		Name: value.Name, Scope: egressdomain.Scope(value.Scope), Enabled: value.Enabled,
-		ProxyURL: value.ProxyURL, ClearProxyURL: value.ClearProxyURL, UserAgent: value.UserAgent,
+		Name: value.Name, Scope: egressdomain.Scope(value.Scope), Scopes: parseScopeList(value.Scopes, value.Scope),
+		Enabled: value.Enabled, ProxyURL: value.ProxyURL, ClearProxyURL: value.ClearProxyURL, UserAgent: value.UserAgent,
 		CloudflareCookies: value.CloudflareCookies, ClearCookies: value.ClearCookies,
 	}
+}
+
+func parseScopeList(scopes []string, primary string) []egressdomain.Scope {
+	out := make([]egressdomain.Scope, 0, len(scopes)+1)
+	for _, item := range scopes {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, egressdomain.Scope(item))
+	}
+	if len(out) == 0 && strings.TrimSpace(primary) != "" {
+		out = append(out, egressdomain.Scope(strings.TrimSpace(primary)))
+	}
+	return out
 }
 
 func (h *Handler) list(c *gin.Context) {
@@ -219,8 +244,8 @@ func (h *Handler) createBatch(c *gin.Context) {
 		prefix = strings.TrimSpace(request.Name)
 	}
 	result, err := h.service.CreateBatch(c.Request.Context(), egressapp.BatchCreateInput{
-		NamePrefix: prefix, Scope: egressdomain.Scope(request.Scope), Enabled: enabled,
-		ProxyURLs: urls, UserAgent: request.UserAgent, CloudflareCookies: request.CloudflareCookies,
+		NamePrefix: prefix, Scope: egressdomain.Scope(request.Scope), Scopes: parseScopeList(request.Scopes, request.Scope),
+		Enabled: enabled, ProxyURLs: urls, UserAgent: request.UserAgent, CloudflareCookies: request.CloudflareCookies,
 	})
 	if err != nil {
 		h.writeError(c, err)
@@ -234,6 +259,63 @@ func (h *Handler) createBatch(c *gin.Context) {
 		"created": result.Created, "failed": result.Failed, "skipped": result.Skipped,
 		"errors": result.Errors, "items": items,
 	})
+}
+
+func (h *Handler) batchEnabled(c *gin.Context) {
+	var request batchIDsRequest
+	if c.ShouldBindJSON(&request) != nil || request.Enabled == nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	ids, err := parseUintIDs(request.IDs)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
+		return
+	}
+	updated, err := h.service.SetEnabledBatch(c.Request.Context(), ids, *request.Enabled)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"updated": updated, "enabled": *request.Enabled})
+}
+
+func (h *Handler) batchClearErrors(c *gin.Context) {
+	var request batchIDsRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	ids, err := parseUintIDs(request.IDs)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
+		return
+	}
+	cleared, err := h.service.ClearErrorsBatch(c.Request.Context(), ids)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"cleared": cleared})
+}
+
+func parseUintIDs(values []string) ([]uint64, error) {
+	out := make([]uint64, 0, len(values))
+	for _, raw := range values {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		id, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || id == 0 {
+			return nil, errors.New("账号 ID 无效")
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("至少选择一个节点")
+	}
+	return out, nil
 }
 
 func (h *Handler) update(c *gin.Context) {
@@ -255,13 +337,24 @@ func (h *Handler) update(c *gin.Context) {
 }
 
 func newNodeResponse(value egressdomain.PublicNode) nodeResponse {
+	scopes := make([]string, 0, len(value.Scopes))
+	for _, scope := range value.Scopes {
+		scopes = append(scopes, string(scope))
+	}
+	if len(scopes) == 0 && value.Scope != "" {
+		scopes = []string{string(value.Scope)}
+	}
+	primary := string(value.Scope)
+	if primary == "" && len(scopes) > 0 {
+		primary = scopes[0]
+	}
 	return nodeResponse{
-		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Scope: primary, Scopes: scopes, Enabled: value.Enabled,
 		ProxyConfigured: value.ProxyConfigured, ProxyProtocol: value.ProxyProtocol, UserAgent: value.UserAgent, CookieConfigured: value.CookieConfigured,
 		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		SuccessCount: value.SuccessCount, RequestCount: value.RequestCount, SuccessRate: value.SuccessRate, FailureRate: value.FailureRate,
 		Inflight: value.Inflight, LastProbeAt: value.LastProbeAt, LastProbeOK: value.LastProbeOK, LastProbeMs: value.LastProbeMs,
-		LastProbeError: value.LastProbeError,
+		LastProbeError: egressapp.LocalizeEgressError(value.LastProbeError),
 	}
 }
 

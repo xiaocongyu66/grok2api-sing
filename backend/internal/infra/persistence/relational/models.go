@@ -370,9 +370,10 @@ type runtimeSettingsModel struct {
 func (runtimeSettingsModel) TableName() string { return "runtime_settings" }
 
 type egressNodeModel struct {
-	ID                        uint64  `gorm:"primaryKey;autoIncrement"`
-	Name                      string  `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
-	Scope                     string  `gorm:"size:32;not null;check:chk_egress_nodes_specific_scope,scope IN ('grok_build','grok_web','grok_console','grok_web_asset')"`
+	ID   uint64 `gorm:"primaryKey;autoIncrement"`
+	Name string `gorm:"size:160;not null;check:chk_egress_nodes_name,length(trim(name)) BETWEEN 1 AND 160"`
+	// Scope stores one or more scopes comma-separated (e.g. grok_web,grok_build). App-validated.
+	Scope                     string  `gorm:"size:128;not null;check:chk_egress_nodes_specific_scope,length(trim(scope)) BETWEEN 1 AND 128"`
 	Enabled                   bool    `gorm:"not null;default:true"`
 	EncryptedProxyURL         string  `gorm:"type:text;not null;default:'';check:chk_egress_nodes_proxy_url,length(encrypted_proxy_url) <= 65536"`
 	UserAgent                 string  `gorm:"size:512;not null;default:'';check:chk_egress_nodes_user_agent,length(user_agent) <= 512"`

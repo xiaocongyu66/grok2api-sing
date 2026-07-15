@@ -36,7 +36,8 @@ type RuntimeSource interface {
 
 type Input struct {
 	Name              string
-	Scope             domain.Scope
+	Scope             domain.Scope   // primary / legacy single scope
+	Scopes            []domain.Scope // multi-select; when set, overrides Scope
 	Enabled           bool
 	ProxyURL          *string
 	ClearProxyURL     bool
@@ -200,6 +201,7 @@ const maxBatchProxyNodes = 500
 type BatchCreateInput struct {
 	NamePrefix        string
 	Scope             domain.Scope
+	Scopes            []domain.Scope
 	Enabled           bool
 	ProxyURLs         []string
 	UserAgent         string
@@ -250,7 +252,7 @@ func (s *Service) CreateBatch(ctx context.Context, input BatchCreateInput) (Batc
 		name := fmt.Sprintf("%s#%d", prefix, index+1)
 		urlCopy := proxyURL
 		node, err := s.Create(ctx, Input{
-			Name: name, Scope: input.Scope, Enabled: input.Enabled,
+			Name: name, Scope: input.Scope, Scopes: input.Scopes, Enabled: input.Enabled,
 			ProxyURL: &urlCopy, UserAgent: input.UserAgent, CloudflareCookies: input.CloudflareCookies,
 		})
 		if err != nil {
@@ -297,25 +299,122 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 	return err
 }
 
+// SetEnabledBatch enables or disables many nodes.
+func (s *Service) SetEnabledBatch(ctx context.Context, ids []uint64, enabled bool) (int, error) {
+	updated := 0
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		value, err := s.repository.GetEgressNode(ctx, id)
+		if errors.Is(err, repository.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return updated, err
+		}
+		if value.Enabled == enabled {
+			updated++
+			continue
+		}
+		value.Enabled = enabled
+		if _, err := s.repository.UpdateEgressNode(ctx, value); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
+}
+
+// ClearErrorsBatch resets last error / failure / cooldown / health for selected nodes.
+func (s *Service) ClearErrorsBatch(ctx context.Context, ids []uint64) (int, error) {
+	cleared := 0
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		value, err := s.repository.GetEgressNode(ctx, id)
+		if errors.Is(err, repository.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return cleared, err
+		}
+		value.LastError = ""
+		value.FailureCount = 0
+		value.CooldownUntil = nil
+		value.Health = 1
+		if _, err := s.repository.UpdateEgressNode(ctx, value); err != nil {
+			return cleared, err
+		}
+		cleared++
+	}
+	return cleared, nil
+}
+
+func normalizeScopes(primary domain.Scope, scopes []domain.Scope) ([]domain.Scope, error) {
+	raw := scopes
+	if len(raw) == 0 && primary != "" {
+		raw = []domain.Scope{primary}
+	}
+	out := make([]domain.Scope, 0, len(raw))
+	seen := make(map[domain.Scope]struct{}, len(raw))
+	for _, scope := range raw {
+		if !scope.IsValid() {
+			return nil, fmt.Errorf("%w: scope 必须是 grok_build、grok_web、grok_console 或 grok_web_asset", ErrInvalidInput)
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: 至少选择一个作用域", ErrInvalidInput)
+	}
+	return out, nil
+}
+
+func scopesNeedBrowserIdentity(scopes []domain.Scope) bool {
+	for _, scope := range scopes {
+		if scope != domain.ScopeBuild {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) applyInput(value domain.Node, input Input, create bool) (domain.Node, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" || len(name) > 160 {
 		return domain.Node{}, fmt.Errorf("%w: 名称必须在 1 到 160 个字符之间", ErrInvalidInput)
 	}
-	if input.Scope != domain.ScopeBuild && input.Scope != domain.ScopeWeb && input.Scope != domain.ScopeConsole && input.Scope != domain.ScopeWebAsset {
-		return domain.Node{}, fmt.Errorf("%w: scope 必须是 grok_build、grok_web、grok_console 或 grok_web_asset", ErrInvalidInput)
+	scopes, err := normalizeScopes(input.Scope, input.Scopes)
+	if err != nil {
+		return domain.Node{}, err
 	}
-	value.Name, value.Scope, value.Enabled = name, input.Scope, input.Enabled
-	if input.Scope == domain.ScopeBuild {
-		// Build 请求始终沿用 Provider 生成的 CLI User-Agent，出口节点不得覆盖协议身份。
+	primary := scopes[0]
+	value.Name, value.Scope, value.Scopes, value.Enabled = name, primary, scopes, input.Enabled
+	needsBrowser := scopesNeedBrowserIdentity(scopes)
+	if !needsBrowser {
+		// Build-only: always inherit Provider CLI User-Agent; no CF cookies.
 		value.UserAgent = ""
+		value.EncryptedCloudflareCookie = ""
 	} else {
 		value.UserAgent = strings.TrimSpace(input.UserAgent)
-	}
-	if input.Scope != domain.ScopeBuild && value.UserAgent == "" {
-		s.mu.RLock()
-		value.UserAgent = s.defaultUserAgent(input.Scope)
-		s.mu.RUnlock()
+		if value.UserAgent == "" {
+			s.mu.RLock()
+			// Prefer web UA when multiple non-build scopes are selected.
+			uaScope := primary
+			for _, scope := range scopes {
+				if scope != domain.ScopeBuild {
+					uaScope = scope
+					break
+				}
+			}
+			value.UserAgent = s.defaultUserAgent(uaScope)
+			s.mu.RUnlock()
+		}
 	}
 	if len(value.UserAgent) > 512 {
 		return domain.Node{}, fmt.Errorf("%w: User-Agent 过长", ErrInvalidInput)
@@ -334,20 +433,20 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 			}
 		}
 	}
-	if input.Scope == domain.ScopeBuild {
-		value.EncryptedCloudflareCookie = ""
-	} else if input.ClearCookies {
-		value.EncryptedCloudflareCookie = ""
-	} else if input.CloudflareCookies != nil {
-		if len(*input.CloudflareCookies) > maxCloudflareCookieBytes {
-			return domain.Node{}, fmt.Errorf("%w: Cloudflare Cookie 不能超过 16 KiB", ErrInvalidInput)
-		}
-		cookies := SanitizeCloudflareCookies(*input.CloudflareCookies)
-		if cookies != "" || create {
-			var err error
-			value.EncryptedCloudflareCookie, err = s.cipher.Encrypt(cookies)
-			if err != nil {
-				return domain.Node{}, err
+	if needsBrowser {
+		if input.ClearCookies {
+			value.EncryptedCloudflareCookie = ""
+		} else if input.CloudflareCookies != nil {
+			if len(*input.CloudflareCookies) > maxCloudflareCookieBytes {
+				return domain.Node{}, fmt.Errorf("%w: Cloudflare Cookie 不能超过 16 KiB", ErrInvalidInput)
+			}
+			cookies := SanitizeCloudflareCookies(*input.CloudflareCookies)
+			if cookies != "" || create {
+				var err error
+				value.EncryptedCloudflareCookie, err = s.cipher.Encrypt(cookies)
+				if err != nil {
+					return domain.Node{}, err
+				}
 			}
 		}
 	}
@@ -365,8 +464,13 @@ func (s *Service) defaultUserAgent(scope domain.Scope) string {
 }
 
 func (s *Service) publicNode(value domain.Node) domain.PublicNode {
+	scopes := value.EffectiveScopes()
+	primary := value.Scope
+	if primary == "" && len(scopes) > 0 {
+		primary = scopes[0]
+	}
 	userAgent := value.UserAgent
-	if value.Scope == domain.ScopeBuild {
+	if !scopesNeedBrowserIdentity(scopes) {
 		userAgent = ""
 	}
 	proxyConfigured := value.EncryptedProxyURL != ""
@@ -377,9 +481,9 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 		}
 	}
 	node := domain.PublicNode{
-		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Scope: primary, Scopes: scopes, Enabled: value.Enabled,
 		ProxyConfigured: proxyConfigured, ProxyProtocol: protocol, UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
-		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
+		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: LocalizeEgressError(value.LastError),
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 	s.mu.RLock()
@@ -405,6 +509,34 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 // publicNode keeps tests that call the helper without a Service instance working.
 func publicNode(value domain.Node) domain.PublicNode {
 	return (&Service{}).publicNode(value)
+}
+
+// LocalizeEgressError maps stored English runtime error codes to Chinese for the admin UI.
+func LocalizeEgressError(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	switch {
+	case lower == "anti-bot rejection":
+		return "疑似反爬拒绝（403）"
+	case lower == "transport error":
+		return "传输/连通失败"
+	case strings.HasPrefix(lower, "upstream status "):
+		code := strings.TrimSpace(value[len("upstream status "):])
+		return "上游状态码 " + code
+	case strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "timeout"):
+		return "请求超时"
+	case strings.Contains(lower, "connection refused"):
+		return "连接被拒绝"
+	case strings.Contains(lower, "no such host"):
+		return "域名无法解析"
+	case strings.Contains(lower, "tls") && strings.Contains(lower, "handshake"):
+		return "TLS 握手失败"
+	default:
+		return value
+	}
 }
 
 // ProxyProtocolLabel returns a short safe protocol name for admin UI (no host/user/password).

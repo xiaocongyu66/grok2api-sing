@@ -45,7 +45,7 @@ export type SettingsConfigDTO = {
 };
 
 export type EgressNodeDTO = {
-  id: string; name: string; scope: EgressScope; enabled: boolean;
+  id: string; name: string; scope: EgressScope; scopes: EgressScope[]; enabled: boolean;
   proxyConfigured: boolean; proxyProtocol?: string; userAgent: string; cookieConfigured: boolean;
   health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
   successCount: number; requestCount: number; successRate: number; failureRate: number;
@@ -53,13 +53,14 @@ export type EgressNodeDTO = {
 };
 
 export type EgressNodeInput = {
-  name: string; scope: EgressScope; enabled: boolean; proxyURL?: string;
+  name: string; scope: EgressScope; scopes: EgressScope[]; enabled: boolean; proxyURL?: string;
   clearProxyURL?: boolean; userAgent: string; cloudflareCookies?: string; clearCookies?: boolean;
 };
 
 export type EgressBatchImportInput = {
   namePrefix: string;
   scope: EgressScope;
+  scopes: EgressScope[];
   enabled: boolean;
   proxyText: string;
   userAgent?: string;
@@ -108,16 +109,39 @@ function coerceScope(value: unknown): EgressScope {
   return "grok_web";
 }
 
+function coerceScopes(raw: unknown, primary: unknown): EgressScope[] {
+  const out: EgressScope[] = [];
+  const seen = new Set<string>();
+  const push = (value: unknown) => {
+    const scope = coerceScope(value);
+    if (seen.has(scope)) return;
+    // Only accept known values from explicit strings; coerceScope maps unknown → grok_web.
+    if (typeof value === "string" && !(EGRESS_SCOPES as readonly string[]).includes(value) && value !== "") return;
+    seen.add(scope);
+    out.push(scope);
+  };
+  if (Array.isArray(raw)) {
+    for (const item of raw) push(item);
+  } else if (typeof raw === "string" && raw.includes(",")) {
+    for (const part of raw.split(",")) push(part.trim());
+  }
+  if (out.length === 0) push(primary);
+  if (out.length === 0) out.push("grok_web");
+  return out;
+}
+
 function normalizeEgressNode(raw: unknown): EgressNodeDTO | null {
   if (!isObject(raw)) return null;
   const record = raw as Record<string, unknown>;
   const id = coerceString(record.id);
   const name = coerceString(record.name);
   if (!id || !name) return null;
+  const scopes = coerceScopes(record.scopes ?? record.scope, record.scope);
   return {
     id,
     name,
-    scope: coerceScope(record.scope),
+    scope: scopes[0] ?? coerceScope(record.scope),
+    scopes,
     enabled: coerceBoolean(record.enabled, true),
     proxyConfigured: coerceBoolean(record.proxyConfigured),
     proxyProtocol: typeof record.proxyProtocol === "string" ? record.proxyProtocol : undefined,
@@ -299,7 +323,14 @@ export function testAllEgressNodes(scope?: EgressScope): Promise<EgressProbeBatc
 }
 
 export function createEgressNode(input: EgressNodeInput): Promise<EgressNodeDTO> {
-  return apiRequest("/api/admin/v1/egress-nodes", { method: "POST", body: input }, decodeEgressNodeResilient);
+  return apiRequest("/api/admin/v1/egress-nodes", {
+    method: "POST",
+    body: {
+      ...input,
+      scope: input.scopes[0] ?? input.scope,
+      scopes: input.scopes,
+    },
+  }, decodeEgressNodeResilient);
 }
 
 export function createEgressNodesBatch(input: EgressBatchImportInput): Promise<EgressBatchImportResultDTO> {
@@ -307,7 +338,8 @@ export function createEgressNodesBatch(input: EgressBatchImportInput): Promise<E
     method: "POST",
     body: {
       namePrefix: input.namePrefix,
-      scope: input.scope,
+      scope: input.scopes[0] ?? input.scope,
+      scopes: input.scopes,
       enabled: input.enabled,
       proxyText: input.proxyText,
       userAgent: input.userAgent ?? "",
@@ -317,9 +349,30 @@ export function createEgressNodesBatch(input: EgressBatchImportInput): Promise<E
 }
 
 export function updateEgressNode(id: string, input: EgressNodeInput): Promise<EgressNodeDTO> {
-  return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "PUT", body: input }, decodeEgressNodeResilient);
+  return apiRequest(`/api/admin/v1/egress-nodes/${id}`, {
+    method: "PUT",
+    body: {
+      ...input,
+      scope: input.scopes[0] ?? input.scope,
+      scopes: input.scopes,
+    },
+  }, decodeEgressNodeResilient);
 }
 
 export function deleteEgressNode(id: string): Promise<{ deleted: boolean }> {
   return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "DELETE" }, decodeBooleanResult<{ deleted: boolean }>("deleted"));
+}
+
+export function setEgressNodesEnabled(ids: string[], enabled: boolean): Promise<{ updated: number; enabled: boolean }> {
+  return apiRequest("/api/admin/v1/egress-nodes/batch-enabled", {
+    method: "POST",
+    body: { ids, enabled },
+  }, createObjectDecoder("egress batch enabled", { updated: isNumber, enabled: isBoolean }));
+}
+
+export function clearEgressNodesErrors(ids: string[]): Promise<{ cleared: number }> {
+  return apiRequest("/api/admin/v1/egress-nodes/batch-clear-errors", {
+    method: "POST",
+    body: { ids },
+  }, createObjectDecoder("egress batch clear errors", { cleared: isNumber }));
 }

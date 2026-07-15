@@ -394,7 +394,7 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		value.FailureCount++
 		value.Health = max(0.05, value.Health*0.7)
 		value.CooldownUntil = nil
-		value.LastError = "anti-bot rejection"
+		value.LastError = "疑似反爬拒绝（403）"
 		m.mu.Lock()
 		m.invalidateClientLocked(nodeID)
 		m.mu.Unlock()
@@ -406,9 +406,9 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		until := now.Add(cooldown)
 		value.CooldownUntil = &until
 		if transportErr != nil {
-			value.LastError = "transport error"
+			value.LastError = "传输/连通失败"
 		} else {
-			value.LastError = fmt.Sprintf("upstream status %d", status)
+			value.LastError = fmt.Sprintf("上游状态码 %d", status)
 		}
 		m.mu.Lock()
 		m.invalidateClientLocked(nodeID)
