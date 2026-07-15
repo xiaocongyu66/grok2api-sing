@@ -29,9 +29,9 @@ export type DashboardDTO = {
     billedCostUsdTicks: number;
     successRate: number;
   };
-  /** Site-wide rates over the last ~60s (new-api style). */
+  /** Site-wide rates for the selected period (raw counts if ≤2m, else avg/min). */
   liveRates: { rpm: number; tpm: number; windowSeconds: number };
-  /** Calendar-day totals in the admin timezone. */
+  /** Totals for the same selected period as usage (API field name kept for compatibility). */
   today: { requests: number; tokens: number; start: string; end: string };
   series: Array<{ start: string; end: string; requests: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; tokens: number; billedCostUsdTicks: number; models: Array<{ model: string; tokens: number; billedCostUsdTicks: number }> }>;
   topModels: Array<{ model: string; requests: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; tokens: number; billedCostUsdTicks: number }>;

@@ -66,8 +66,8 @@ export function DashboardPage() {
         end: customQuery?.end,
       }),
     placeholderData: (previous) => previous,
-    // Live RPM/TPM benefit from a short poll while the page is open.
-    refetchInterval: 30_000,
+    // Short ranges refresh more often so RPM/TPM stay useful; long custom ranges poll slowly.
+    refetchInterval: period === "custom" ? 60_000 : 30_000,
   });
 
   function refreshAll(): void {
@@ -116,47 +116,35 @@ export function DashboardPage() {
   const displayName = admin?.username ? admin.username.charAt(0).toUpperCase() + admin.username.slice(1) : "Admin";
   const windowSeconds = liveRates?.windowSeconds ?? 60;
   const periodLabel = period === "custom" && customQuery ? `${customQuery.start} → ${customQuery.end}` : period;
+  const rateIsAverage = windowSeconds > 120;
+  const rpmDetail = rateIsAverage
+    ? t("dashboard.rpmAverageDetail", { period: periodLabel })
+    : t("dashboard.rpmDetail", { seconds: windowSeconds });
+  const tpmDetail = rateIsAverage
+    ? t("dashboard.tpmAverageDetail", { period: periodLabel })
+    : t("dashboard.tpmDetail", { seconds: windowSeconds });
+  const periodTotalsDetail = t("dashboard.periodTotalsDetail", { period: periodLabel });
 
   return (
     <div className="space-y-8">
       <header>
-        <div>
-          <h1 className="text-xl font-medium">{t("dashboard.title")}</h1>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {t("dashboard.subtitle", { name: displayName })}
-            {dashboard?.generatedAt ? <span> · {t("dashboard.lastUpdated", { time: formatDateTime(dashboard.generatedAt, i18n.language) })}</span> : null}
-          </p>
-        </div>
-      </header>
-
-      <section className="space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="shrink-0 text-sm font-medium">{t("dashboard.liveRates")}</h2>
-          <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={refreshAll} disabled={dashboardQuery.isFetching || manualRefreshing} aria-label={t("common.refresh")}>
-            <RefreshCw className={manualRefreshing ? "animate-spin" : undefined} />
-          </Button>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard icon={<Gauge />} label={t("dashboard.rpm")} value={formatNumber(liveRates?.rpm ?? 0, i18n.language)} detail={t("dashboard.rpmDetail", { seconds: windowSeconds })} loading={loading} />
-          <MetricCard icon={<Zap />} label={t("dashboard.tpm")} value={formatNumber(liveRates?.tpm ?? 0, i18n.language)} detail={t("dashboard.tpmDetail", { seconds: windowSeconds })} loading={loading} />
-          <MetricCard icon={<Activity />} label={t("dashboard.todayRequests")} value={formatNumber(today?.requests ?? 0, i18n.language)} detail={t("dashboard.todayDetail")} loading={loading} />
-          <MetricCard icon={<Box />} label={t("dashboard.todayTokens")} value={formatNumber(today?.tokens ?? 0, i18n.language)} detail={t("dashboard.todayDetail")} loading={loading} />
-        </div>
-      </section>
-
-      <section className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="shrink-0 text-sm font-medium">{t("dashboard.usage")}</h2>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-medium">{t("dashboard.title")}</h1>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t("dashboard.subtitle", { name: displayName })}
+              {dashboard?.generatedAt ? <span> · {t("dashboard.lastUpdated", { time: formatDateTime(dashboard.generatedAt, i18n.language) })}</span> : null}
+            </p>
+          </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
             <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={refreshAll} disabled={dashboardQuery.isFetching || manualRefreshing} aria-label={t("common.refresh")}>
               <RefreshCw className={manualRefreshing ? "animate-spin" : undefined} />
             </Button>
-            <PeriodSelector value={periodSelection} onChange={handlePeriodChange} ariaLabel={t("dashboard.usage")} allowCustom customLabel={t("dashboard.customRange")} />
+            <PeriodSelector value={periodSelection} onChange={handlePeriodChange} ariaLabel={t("dashboard.periodControl")} allowCustom customLabel={t("dashboard.customRange")} />
           </div>
         </div>
-
         {periodSelection === "custom" ? (
-          <div className="flex flex-wrap items-end gap-2 rounded-lg bg-card p-3">
+          <div className="mt-3 flex flex-wrap items-end gap-2 rounded-lg bg-card p-3">
             <label className="space-y-1">
               <span className="block text-[11px] text-muted-foreground">{t("dashboard.customStart")}</span>
               <Input
@@ -185,6 +173,25 @@ export function DashboardPage() {
             <p className="basis-full text-[11px] text-muted-foreground sm:basis-auto sm:ml-1 sm:self-center">{t("dashboard.customRangeHint")}</p>
           </div>
         ) : null}
+      </header>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="shrink-0 text-sm font-medium">{t("dashboard.liveRates")}</h2>
+          <span className="text-[11px] text-muted-foreground">{t("dashboard.sharedPeriodHint", { period: periodLabel })}</span>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard icon={<Gauge />} label={t("dashboard.rpm")} value={formatNumber(liveRates?.rpm ?? 0, i18n.language)} detail={rpmDetail} loading={loading} />
+          <MetricCard icon={<Zap />} label={t("dashboard.tpm")} value={formatNumber(liveRates?.tpm ?? 0, i18n.language)} detail={tpmDetail} loading={loading} />
+          <MetricCard icon={<Activity />} label={t("dashboard.periodRequests")} value={formatNumber(today?.requests ?? 0, i18n.language)} detail={periodTotalsDetail} loading={loading} />
+          <MetricCard icon={<Box />} label={t("dashboard.periodTokens")} value={formatNumber(today?.tokens ?? 0, i18n.language)} detail={periodTotalsDetail} loading={loading} />
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="shrink-0 text-sm font-medium">{t("dashboard.usage")}</h2>
+        </div>
 
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard icon={<Users />} label={t("dashboard.activeAccounts")} value={formatNumber(activeAccounts, i18n.language)} detail={t("dashboard.availableSummary", { active: activeAccounts, total: resources?.totalAccounts ?? 0 })} loading={loading} />

@@ -93,7 +93,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	modelRepo := relational.NewModelRepository(database)
 	clientKeyRepo := relational.NewClientKeyRepository(database)
 	auditRepo := relational.NewAuditRepository(database)
-	responseRepo := relational.NewResponseRepository(database)
+	var responseRepo repository.ResponseRepository = relational.NewResponseRepository(database)
 	dashboardRepo := relational.NewDashboardRepository(database)
 	runtimeSettingsRepo := relational.NewRuntimeSettingsRepository(database, cipher)
 	egressRepo := relational.NewEgressRepository(database)
@@ -140,6 +140,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		refreshLock = redisruntime.NewLockStore(redisStore)
 		settingsBus = redisStore
 		quotaQueue = redisStore
+		// new-api / sub2api style: Redis as hot cache for multi-turn Web state.
+		responseRepo = redisruntime.NewResponseStateCache(responseRepo, redisStore)
 	case "memory":
 		rateLimiter = memory.NewRateLimiter()
 		concurrency = memory.NewConcurrencyLimiter()
@@ -232,6 +234,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, cfg.Provider.Console.UserAgent)
 	egressService.SetRuntime(egressManager)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
+	// new-api style Redis token cache: multi-instance shared API key auth objects.
+	if redisStore, ok := runtimeStore.(*redisruntime.Store); ok {
+		clientKeyService.SetTokenCache(redisruntime.NewTokenCache(redisStore))
+	}
 	auditService := auditapp.NewService(auditRepo, logger, cfg.Audit.BufferSize, cfg.Audit.BatchSize, cfg.Audit.FlushInterval.Value())
 	dashboardService := dashboardapp.NewService(dashboardRepo)
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())

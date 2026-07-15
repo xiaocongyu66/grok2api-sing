@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokencount"
 )
 
 const (
@@ -146,41 +148,7 @@ func estimateRequestOutputLimit(body []byte) int64 {
 }
 
 func estimateRequestInputTokens(body []byte) int64 {
-	var payload any
-	if json.Unmarshal(body, &payload) != nil {
-		return max(256, int64((len(body)+2)/3))
-	}
-	return max(256, estimateJSONTokens(payload)+128)
-}
-
-func estimateJSONTokens(value any) int64 {
-	switch typed := value.(type) {
-	case map[string]any:
-		var total int64
-		for key, child := range typed {
-			total += int64((len(key)+2)/3) + 1 + estimateJSONTokens(child)
-		}
-		return total
-	case []any:
-		var total int64
-		for _, child := range typed {
-			total += 1 + estimateJSONTokens(child)
-		}
-		return total
-	case string:
-		trimmed := strings.TrimSpace(typed)
-		if strings.HasPrefix(trimmed, "data:image/") || strings.HasPrefix(trimmed, "data:video/") {
-			return 256
-		}
-		return max(1, int64((len(typed)+2)/3))
-	case json.Number, float64, bool:
-		return 1
-	case nil:
-		return 0
-	default:
-		encoded, _ := json.Marshal(typed)
-		return max(1, int64((len(encoded)+2)/3))
-	}
+	return tokencount.EstimateRequestBody(body)
 }
 
 // EstimateOfficialImageCost 按客户端请求的 n 计算 Grok Imagine 图片费用。

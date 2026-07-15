@@ -60,6 +60,15 @@ type ListFilter struct {
 	Sort       repository.SortQuery
 }
 
+// TokenCache is an optional shared cache for client API keys (new-api style Redis token cache).
+// Implementations must be safe for concurrent use; failures should not break auth.
+type TokenCache interface {
+	Get(ctx context.Context, prefix string) (clientkeydomain.Key, bool, error)
+	Set(ctx context.Context, value clientkeydomain.Key) error
+	Delete(ctx context.Context, prefix string) error
+	DeleteMany(ctx context.Context, prefixes []string) error
+}
+
 // Service 负责下游 API Key 创建、鉴权和调用限制。
 type Service struct {
 	keys        repository.ClientKeyRepository
@@ -68,6 +77,7 @@ type Service struct {
 	defaultRPM  atomic.Int64
 	defaultMax  atomic.Int64
 	authCache   *authKeyCache
+	tokenCache  TokenCache // optional Redis L2 (new-api token:{key})
 	touches     *touchTracker
 	cipher      *security.Cipher
 }
@@ -82,6 +92,11 @@ func NewService(keys repository.ClientKeyRepository, rateLimiter repository.Rate
 	service := &Service{keys: keys, rateLimiter: rateLimiter, concurrency: concurrency, authCache: newAuthKeyCache(), touches: newTouchTracker(), cipher: cipher}
 	service.UpdateDefaults(defaultRPM, defaultMax)
 	return service
+}
+
+// SetTokenCache attaches a shared Redis token cache (new-api style). Nil disables L2.
+func (s *Service) SetTokenCache(cache TokenCache) {
+	s.tokenCache = cache
 }
 
 func (s *Service) UpdateDefaults(defaultRPM, defaultMax int) {
@@ -214,17 +229,22 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (cli
 	}
 	updated, err := s.keys.Update(ctx, value)
 	if err == nil {
-		s.authCache.deleteID(id)
+		s.invalidateAuthCaches(ctx, value.Prefix, id)
 	}
 	return updated, mapRepositoryError(err)
 }
 
 func (s *Service) Delete(ctx context.Context, id uint64) error {
+	// Load prefix before delete so Redis token cache can be cleared (new-api cacheDeleteToken).
+	prefix := ""
+	if existing, getErr := s.keys.Get(ctx, id); getErr == nil {
+		prefix = existing.Prefix
+	}
 	if err := s.keys.Delete(ctx, id); err != nil {
 		return mapRepositoryError(err)
 	}
 	s.touches.deleteID(id)
-	s.authCache.deleteID(id)
+	s.invalidateAuthCaches(ctx, prefix, id)
 	return nil
 }
 
@@ -234,10 +254,12 @@ func (s *Service) BatchSetEnabled(ctx context.Context, ids []uint64, enabled boo
 	if err != nil {
 		return 0, err
 	}
+	prefixes := s.prefixesForIDs(ctx, values)
 	updated, err := s.keys.UpdateManyEnabled(ctx, values, enabled)
 	if err == nil {
 		s.touches.deleteIDs(values)
 		s.authCache.deleteIDs(values)
+		s.deleteTokenCacheMany(ctx, prefixes)
 	}
 	return updated, err
 }
@@ -248,15 +270,18 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	if err != nil {
 		return 0, err
 	}
+	prefixes := s.prefixesForIDs(ctx, values)
 	deleted, err := s.keys.DeleteMany(ctx, values)
 	if err == nil {
 		s.touches.deleteIDs(values)
 		s.authCache.deleteIDs(values)
+		s.deleteTokenCacheMany(ctx, prefixes)
 	}
 	return deleted, err
 }
 
 // Authenticate 校验 API Key、RPM 和并发限制，并返回请求结束时必须调用的 release。
+// Lookup order (new-api style): process memory → Redis token cache → DB.
 func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain.Key, func(), error) {
 	prefix, ok := security.SplitClientKey(raw)
 	if !ok {
@@ -264,6 +289,15 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 	}
 	now := time.Now().UTC()
 	value, cached := s.authCache.get(prefix, now)
+	if !cached {
+		if s.tokenCache != nil {
+			if remote, hit, cacheErr := s.tokenCache.Get(ctx, prefix); cacheErr == nil && hit {
+				value = remote
+				cached = true
+				s.authCache.put(prefix, value, now)
+			}
+		}
+	}
 	if !cached {
 		var err error
 		value, err = s.keys.GetByPrefix(ctx, prefix)
@@ -274,6 +308,9 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 			return clientkeydomain.Key{}, nil, ErrInvalidKey
 		}
 		s.authCache.put(prefix, value, now)
+		if s.tokenCache != nil {
+			_ = s.tokenCache.Set(ctx, value)
+		}
 	}
 	if !value.IsAvailable(now) {
 		return clientkeydomain.Key{}, nil, ErrInvalidKey
@@ -397,6 +434,43 @@ func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 		result = append(result, id)
 	}
 	return result, nil
+}
+
+// invalidateAuthCaches drops process memory and Redis token cache for one key (new-api cacheDeleteToken).
+func (s *Service) invalidateAuthCaches(ctx context.Context, prefix string, id uint64) {
+	s.authCache.deleteID(id)
+	if s.tokenCache == nil {
+		return
+	}
+	if prefix == "" {
+		return
+	}
+	_ = s.tokenCache.Delete(ctx, prefix)
+}
+
+func (s *Service) deleteTokenCacheMany(ctx context.Context, prefixes []string) {
+	if s.tokenCache == nil || len(prefixes) == 0 {
+		return
+	}
+	_ = s.tokenCache.DeleteMany(ctx, prefixes)
+}
+
+// prefixesForIDs best-effort resolves prefixes for batch invalidation; missing rows are skipped.
+func (s *Service) prefixesForIDs(ctx context.Context, ids []uint64) []string {
+	prefixes := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		value, err := s.keys.Get(ctx, id)
+		if err != nil || value.Prefix == "" {
+			continue
+		}
+		if _, ok := seen[value.Prefix]; ok {
+			continue
+		}
+		seen[value.Prefix] = struct{}{}
+		prefixes = append(prefixes, value.Prefix)
+	}
+	return prefixes
 }
 
 // invalidInput 为可安全返回给管理端的客户端 Key 参数错误附加稳定语义。

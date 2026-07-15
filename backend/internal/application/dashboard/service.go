@@ -16,7 +16,6 @@ var ErrInvalidTimezone = errors.New("Dashboard 时区无效")
 var ErrInvalidRange = errors.New("Dashboard 自定义时间范围无效")
 
 const dashboardCacheTTL = 15 * time.Second
-const liveRateWindow = time.Minute
 
 type Period string
 
@@ -145,13 +144,11 @@ func (s *Service) load(ctx context.Context, period Period, bucketCount, bucketDa
 	}
 	boundaries = append(boundaries, series[len(series)-1].End)
 	generatedAt := rawNow.UTC()
-	// Calendar day in admin timezone: local midnight → now (or custom end if still today).
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
-	dayEnd := now
-	if !dayEnd.After(dayStart) {
-		dayEnd = dayStart.Add(time.Second)
-	}
-	aggregate, err := s.dashboard.Snapshot(ctx, boundaries, generatedAt, dayStart.UTC(), dayEnd.UTC(), liveRateWindow)
+	// Period totals + RPM/TPM share the same [boundaries[0], boundaries[last]) window.
+	// todayStart/todayEnd and liveWindow are retained for repository interface compatibility.
+	periodStart := boundaries[0]
+	periodEnd := boundaries[len(boundaries)-1]
+	aggregate, err := s.dashboard.Snapshot(ctx, boundaries, generatedAt, periodStart, periodEnd, periodEnd.Sub(periodStart))
 	if err != nil {
 		return Result{}, err
 	}

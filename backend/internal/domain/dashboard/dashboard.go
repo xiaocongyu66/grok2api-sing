@@ -24,17 +24,19 @@ type Usage struct {
 	BilledCostUSDTicks int64
 }
 
-// LiveRates is site-wide traffic over a short sliding window (new-api style).
+// LiveRates is site-wide traffic over the selected dashboard period.
+// For short windows (≤2 minutes) values are raw counts (new-api style).
+// For longer ranges RPM/TPM are average per-minute rates across the period.
 type LiveRates struct {
-	// RPM is request count in the last 60 seconds.
+	// RPM is requests/min (or raw request count when WindowSeconds ≤ 120).
 	RPM int64
-	// TPM is total tokens in the last 60 seconds.
+	// TPM is tokens/min (or raw token count when WindowSeconds ≤ 120).
 	TPM int64
-	// WindowSeconds is the observation window (normally 60).
+	// WindowSeconds is the observation window length in seconds.
 	WindowSeconds int
 }
 
-// DayUsage is calendar-day totals in the admin timezone (00:00–now or full day).
+// DayUsage is totals for the selected dashboard period (same window as Usage).
 type DayUsage struct {
 	Requests int64
 	Tokens   int64

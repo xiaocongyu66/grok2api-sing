@@ -91,13 +91,16 @@ func TestDashboardRepositorySnapshot(t *testing.T) {
 	if len(snapshot.TopModels) != 2 || snapshot.TopModels[0].Model != "grok-primary" || snapshot.TopModels[0].Requests != 2 || snapshot.TopModels[0].Tokens != 110 {
 		t.Fatalf("top models = %#v", snapshot.TopModels)
 	}
-	// No audits in the last 60s → live rates zero; today window is calendar day midnight→now.
-	if snapshot.LiveRates.RPM != 0 || snapshot.LiveRates.TPM != 0 || snapshot.LiveRates.WindowSeconds != 60 {
+	// RPM/TPM share the selected period (24h here → average per minute ≈ 0 for 3 req / 160 tokens).
+	if snapshot.LiveRates.WindowSeconds != 24*3600 {
+		t.Fatalf("liveRates window = %#v", snapshot.LiveRates)
+	}
+	if snapshot.LiveRates.RPM != 0 || snapshot.LiveRates.TPM != 0 {
 		t.Fatalf("liveRates = %#v", snapshot.LiveRates)
 	}
-	// Audits at -1h and -2h fall inside today (midnight→now); -23h is previous day.
-	if snapshot.Today.Requests != 2 || snapshot.Today.Tokens != 60 {
-		t.Fatalf("today = %#v", snapshot.Today)
+	// Period totals match usage for the same [start, end) window.
+	if snapshot.Today.Requests != 3 || snapshot.Today.Tokens != 160 {
+		t.Fatalf("period totals = %#v", snapshot.Today)
 	}
 }
 
@@ -120,17 +123,35 @@ func TestDashboardRepositoryLiveRatesWindow(t *testing.T) {
 	if err := database.db.WithContext(ctx).Create(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
-	boundaries := testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24)
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, boundaries, now, dayStart, now, time.Minute)
+	// Short selected period (≤120s): RPM/TPM are raw counts for that window only.
+	shortBoundaries := []time.Time{now.Add(-60 * time.Second), now}
+	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, shortBoundaries, now, shortBoundaries[0], shortBoundaries[1], time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if snapshot.LiveRates.RPM != 2 || snapshot.LiveRates.TPM != 150 || snapshot.LiveRates.WindowSeconds != 60 {
-		t.Fatalf("liveRates = %#v", snapshot.LiveRates)
+		t.Fatalf("short liveRates = %#v", snapshot.LiveRates)
+	}
+	if snapshot.Today.Requests != 2 || snapshot.Today.Tokens != 150 {
+		t.Fatalf("short period totals = %#v", snapshot.Today)
+	}
+
+	// Longer selected period: averages per minute across the full range.
+	longBoundaries := testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	snapshot, err = NewDashboardRepository(database).Snapshot(ctx, longBoundaries, now, dayStart, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.LiveRates.WindowSeconds != 24*3600 {
+		t.Fatalf("long liveRates window = %#v", snapshot.LiveRates)
+	}
+	// 3 requests / 1440 minutes → 0 RPM; 1149 tokens / 1440 → 1 TPM (rounded).
+	if snapshot.LiveRates.RPM != 0 || snapshot.LiveRates.TPM != 1 {
+		t.Fatalf("long liveRates = %#v", snapshot.LiveRates)
 	}
 	if snapshot.Today.Requests != 3 || snapshot.Today.Tokens != 1149 {
-		t.Fatalf("today = %#v", snapshot.Today)
+		t.Fatalf("long period totals = %#v", snapshot.Today)
 	}
 }
 

@@ -26,7 +26,8 @@ type accountLease struct {
 
 const quotaProbeLease = 5 * time.Minute
 const successPersistInterval = 30 * time.Second
-const candidateCacheTTL = time.Second
+// candidateCacheTTL balances account list freshness vs DB load under multi-instance Redis routing.
+const candidateCacheTTL = 5 * time.Second
 
 type candidateSnapshot struct {
 	values    []account.RoutingCandidate

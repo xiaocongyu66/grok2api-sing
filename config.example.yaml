@@ -49,6 +49,10 @@ database:
 
 runtimeStore:
   # [按需修改] 单实例使用 memory；多实例改为 redis。
+  # Redis（对齐 new-api / sub2api）用于：
+  # - 客户端 API Key 鉴权对象缓存 token:{prefix}（new-api token cache，TTL 60s）
+  # - 客户端 RPM / 并发租约 / 粘滞路由 / 分布式锁 / 设置广播 / 额度恢复队列
+  # - Web previous_response_id 会话热缓存（DB 仍为权威）
   driver: memory # memory | redis
   redis:
     # [必须修改：仅 driver=redis] 填写 Redis 连接信息。

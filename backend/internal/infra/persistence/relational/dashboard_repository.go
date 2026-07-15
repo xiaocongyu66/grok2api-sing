@@ -15,6 +15,7 @@ type DashboardRepository struct{ db *Database }
 func NewDashboardRepository(db *Database) *DashboardRepository { return &DashboardRepository{db: db} }
 
 // Snapshot 在同一数据库事务内读取资源计数和指定区间的审计聚合。
+// liveWindow is unused; RPM/TPM are derived from the selected period [start, end).
 func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []time.Time, snapshotAt, todayStart, todayEnd time.Time, liveWindow time.Duration) (dashboarddomain.Aggregate, error) {
 	if len(bucketBoundaries) < 2 {
 		return dashboarddomain.Aggregate{}, fmt.Errorf("Dashboard 聚合范围无效")
@@ -24,15 +25,9 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []t
 			return dashboarddomain.Aggregate{}, fmt.Errorf("Dashboard 时间桶无效")
 		}
 	}
-	if liveWindow <= 0 {
-		liveWindow = time.Minute
-	}
-	if todayEnd.IsZero() {
-		todayEnd = snapshotAt
-	}
-	if todayStart.IsZero() {
-		todayStart = snapshotAt.Add(-24 * time.Hour)
-	}
+	_ = liveWindow
+	_ = todayStart
+	_ = todayEnd
 	start := bucketBoundaries[0]
 	end := bucketBoundaries[len(bucketBoundaries)-1]
 	bucketExpression, bucketArgs := dashboardBucketExpression(bucketBoundaries)
@@ -85,34 +80,28 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []t
 			return err
 		}
 
-		// new-api style: site-wide RPM/TPM over the last liveWindow (default 60s).
-		liveStart := snapshotAt.Add(-liveWindow)
-		var live struct {
-			RPM int64
-			TPM int64
+		// RPM/TPM follow the same period as usage totals (single time control).
+		// ≤2 minutes: raw counts (new-api 60s style). Longer: average per minute.
+		windowSeconds := int(end.Sub(start).Seconds())
+		if windowSeconds < 1 {
+			windowSeconds = 1
 		}
-		if err := tx.Model(&requestAuditModel{}).
-			Select("COUNT(*) AS rpm, COALESCE(SUM(total_tokens), 0) AS tpm").
-			Where("created_at >= ? AND created_at < ?", liveStart, snapshotAt).
-			Scan(&live).Error; err != nil {
-			return err
+		requests, tokens := result.Usage.Requests, result.Usage.Tokens
+		rpm, tpm := requests, tokens
+		if windowSeconds > 120 {
+			minutes := float64(windowSeconds) / 60.0
+			if minutes < 1 {
+				minutes = 1
+			}
+			rpm = int64(float64(requests)/minutes + 0.5)
+			tpm = int64(float64(tokens)/minutes + 0.5)
 		}
-		result.LiveRates = dashboarddomain.LiveRates{RPM: live.RPM, TPM: live.TPM, WindowSeconds: int(liveWindow / time.Second)}
+		result.LiveRates = dashboarddomain.LiveRates{RPM: rpm, TPM: tpm, WindowSeconds: windowSeconds}
 
-		// Calendar-day totals in admin timezone (passed as todayStart/todayEnd).
-		var today struct {
-			Requests int64
-			Tokens   int64
-		}
-		if err := tx.Model(&requestAuditModel{}).
-			Select("COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens").
-			Where("created_at >= ? AND created_at < ?", todayStart, todayEnd).
-			Scan(&today).Error; err != nil {
-			return err
-		}
+		// Period totals for the top summary cards (same window as Usage).
 		result.Today = dashboarddomain.DayUsage{
-			Requests: today.Requests, Tokens: today.Tokens,
-			Start: todayStart.UTC().Format(time.RFC3339), End: todayEnd.UTC().Format(time.RFC3339),
+			Requests: requests, Tokens: tokens,
+			Start: start.UTC().Format(time.RFC3339), End: end.UTC().Format(time.RFC3339),
 		}
 
 		var buckets []struct {

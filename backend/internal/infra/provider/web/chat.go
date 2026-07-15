@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -23,6 +22,7 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
+	"github.com/chenyme/grok2api/backend/internal/pkg/tokencount"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -1740,11 +1740,7 @@ func writeSSE(writer io.Writer, event string, value any) error {
 }
 
 func estimateTokens(value string) int64 {
-	count := utf8.RuneCountInString(value)
-	if count == 0 {
-		return 0
-	}
-	return int64((count + 3) / 4)
+	return tokencount.EstimateText(value)
 }
 
 func newWebID(prefix string) string {

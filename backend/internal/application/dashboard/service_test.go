@@ -159,12 +159,13 @@ func TestGetRejectsInvalidTimezone(t *testing.T) {
 	}
 }
 
-func TestGetCustomRangeBuildsSeriesAndPassesLiveWindow(t *testing.T) {
+func TestGetCustomRangeBuildsSeriesAndUsesPeriodWindow(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	repository := &dashboardRepositoryStub{
 		aggregate: dashboarddomain.Aggregate{
-			LiveRates: dashboarddomain.LiveRates{RPM: 3, TPM: 900, WindowSeconds: 60},
-			Today:     dashboarddomain.DayUsage{Requests: 12, Tokens: 4000, Start: "2026-07-15T00:00:00Z", End: "2026-07-15T12:00:00Z"},
+			// Repository now derives rates from the period; stub mirrors that contract.
+			LiveRates: dashboarddomain.LiveRates{RPM: 2, TPM: 833, WindowSeconds: 3 * 24 * 3600},
+			Today:     dashboarddomain.DayUsage{Requests: 100, Tokens: 50000, Start: "2020-01-01T00:00:00Z", End: "2020-01-04T00:00:00Z"},
 			Usage:     dashboarddomain.Usage{Requests: 100, SuccessfulRequests: 90, FailedRequests: 10, Tokens: 50000},
 		},
 	}
@@ -188,18 +189,19 @@ func TestGetCustomRangeBuildsSeriesAndPassesLiveWindow(t *testing.T) {
 	if !result.Range.End.Equal(time.Date(2020, 1, 4, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("end = %v", result.Range.End)
 	}
-	if repository.liveWindow != time.Minute {
-		t.Fatalf("liveWindow = %s", repository.liveWindow)
+	// Snapshot receives the full custom period as the shared window.
+	wantWindow := 3 * 24 * time.Hour
+	if repository.liveWindow != wantWindow {
+		t.Fatalf("liveWindow = %s, want %s", repository.liveWindow, wantWindow)
 	}
-	if result.LiveRates.RPM != 3 || result.LiveRates.TPM != 900 {
+	if !repository.todayStart.Equal(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) || !repository.todayEnd.Equal(time.Date(2020, 1, 4, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("period window = %v .. %v", repository.todayStart, repository.todayEnd)
+	}
+	if result.LiveRates.RPM != 2 || result.LiveRates.TPM != 833 {
 		t.Fatalf("liveRates = %#v", result.LiveRates)
 	}
-	if result.Today.Requests != 12 || result.Today.Tokens != 4000 {
-		t.Fatalf("today = %#v", result.Today)
-	}
-	dayStart := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
-	if !repository.todayStart.Equal(dayStart) || !repository.todayEnd.Equal(now) {
-		t.Fatalf("today window = %v .. %v", repository.todayStart, repository.todayEnd)
+	if result.Today.Requests != 100 || result.Today.Tokens != 50000 {
+		t.Fatalf("period totals = %#v", result.Today)
 	}
 }
 
