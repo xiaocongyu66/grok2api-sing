@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, CheckCircle2, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2, XCircle, Zap } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { Activity, CheckCircle2, FileUp, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2, XCircle, Zap } from "lucide-react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -14,8 +14,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import {
   createEgressNode,
+  createEgressNodesBatch,
   deleteEgressNode,
   getEgressReport,
   listEgressNodes,
@@ -34,6 +36,34 @@ import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/tabl
 
 const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", enabled: true, proxyURL: "", userAgent: "", cloudflareCookies: "" };
 
+type BatchImportForm = {
+  namePrefix: string;
+  scope: EgressScope;
+  enabled: boolean;
+  proxyText: string;
+  userAgent: string;
+  cloudflareCookies: string;
+};
+
+const emptyBatch: BatchImportForm = {
+  namePrefix: "代理",
+  scope: "grok_build",
+  enabled: true,
+  proxyText: "",
+  userAgent: "",
+  cloudflareCookies: "",
+};
+
+function countProxyLines(text: string): number {
+  const seen = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const value = line.trim();
+    if (!value || value.startsWith("#")) continue;
+    seen.add(value);
+  }
+  return seen.size;
+}
+
 function percent(value: number): string {
   if (!Number.isFinite(value)) return "—";
   return `${Math.round(value * 1000) / 10}%`;
@@ -44,6 +74,8 @@ export function ProxiesPage() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<EgressNodeDTO | null | undefined>(undefined);
   const [form, setForm] = useState<EgressNodeInput>(emptyInput);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchForm, setBatchForm] = useState<BatchImportForm>(emptyBatch);
   const [sort, setSort] = useState<TableSort>({ field: "", order: "asc" });
   const [testingId, setTestingId] = useState<string | null>(null);
 
@@ -52,6 +84,15 @@ export function ProxiesPage() {
     queryKey: ["egress-nodes", sort.field, sort.order],
     queryFn: () => listEgressNodes({ sortBy: sort.field || undefined, sortOrder: sort.field ? sort.order : undefined }),
   });
+
+  const batchCount = useMemo(() => countProxyLines(batchForm.proxyText), [batchForm.proxyText]);
+  const batchPreview = useMemo(() => {
+    const prefix = batchForm.namePrefix.trim() || t("proxies.defaultNamePrefix");
+    if (batchCount <= 0) return "";
+    if (batchCount === 1) return `${prefix}#1`;
+    if (batchCount === 2) return `${prefix}#1, ${prefix}#2`;
+    return `${prefix}#1 … ${prefix}#${batchCount}`;
+  }, [batchCount, batchForm.namePrefix, t]);
 
   function invalidateAll() {
     void queryClient.invalidateQueries({ queryKey: ["egress-nodes"] });
@@ -69,6 +110,26 @@ export function ProxiesPage() {
       return editing ? updateEgressNode(editing.id, input) : createEgressNode(input);
     },
     onSuccess: () => { invalidateAll(); setEditing(undefined); toast.success(t("proxies.saved")); },
+    onError: (error) => showError(error, t("proxies.operationFailed")),
+  });
+  const batchImport = useMutation({
+    mutationFn: () => createEgressNodesBatch({
+      namePrefix: batchForm.namePrefix.trim() || t("proxies.defaultNamePrefix"),
+      scope: batchForm.scope,
+      enabled: batchForm.enabled,
+      proxyText: batchForm.proxyText,
+      userAgent: batchForm.scope === "grok_build" ? "" : batchForm.userAgent,
+      cloudflareCookies: batchForm.scope === "grok_build" ? undefined : batchForm.cloudflareCookies.trim() || undefined,
+    }),
+    onSuccess: (result) => {
+      invalidateAll();
+      setBatchOpen(false);
+      setBatchForm(emptyBatch);
+      toast.success(t("proxies.batchImported", { created: result.created, failed: result.failed }));
+      if (result.errors.length > 0) {
+        toast.error(result.errors.slice(0, 3).join("；"));
+      }
+    },
     onError: (error) => showError(error, t("proxies.operationFailed")),
   });
   const remove = useMutation({
@@ -99,6 +160,14 @@ export function ProxiesPage() {
   function openCreate() {
     setForm(emptyInput);
     setEditing(null);
+  }
+
+  function openBatch() {
+    setBatchForm({
+      ...emptyBatch,
+      userAgent: listQuery.data?.defaultUserAgents.grok_build ?? "",
+    });
+    setBatchOpen(true);
   }
 
   function openEdit(node: EgressNodeDTO) {
@@ -158,6 +227,10 @@ export function ProxiesPage() {
           <Button type="button" size="sm" variant="outline" onClick={() => { void listQuery.refetch(); void reportQuery.refetch(); }}>
             <RefreshCw className={cn("size-3.5", (listQuery.isFetching || reportQuery.isFetching) && "animate-spin")} />
             {t("common.refresh")}
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={openBatch}>
+            <FileUp className="size-3.5" />
+            {t("proxies.batchImport")}
           </Button>
           <Button type="button" size="sm" variant="secondary" onClick={openCreate}>
             <Plus className="size-3.5" />
@@ -297,6 +370,92 @@ export function ProxiesPage() {
           </TableBody>
         </Table>
       </div>
+
+      <Dialog open={batchOpen} onOpenChange={(open) => { if (!open) { setBatchOpen(false); setBatchForm(emptyBatch); } }}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t("proxies.batchImportTitle")}</DialogTitle>
+            <DialogDescription>{t("proxies.batchImportDescription")}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label={t("proxies.namePrefix")} className="sm:col-span-2">
+              <Input
+                className="border-transparent"
+                value={batchForm.namePrefix}
+                placeholder={t("proxies.defaultNamePrefix")}
+                onChange={(event) => setBatchForm({ ...batchForm, namePrefix: event.target.value })}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {batchCount > 0
+                  ? t("proxies.batchNamePreview", { preview: batchPreview, count: batchCount })
+                  : t("proxies.batchNameHint")}
+              </p>
+            </Field>
+            <Field label={t("proxies.scope")}>
+              <Select
+                value={batchForm.scope}
+                onValueChange={(value) => {
+                  const scope = value as EgressScope;
+                  const previousDefault = listQuery.data?.defaultUserAgents[batchForm.scope] ?? "";
+                  const nextDefault = listQuery.data?.defaultUserAgents[scope] ?? "";
+                  setBatchForm({
+                    ...batchForm,
+                    scope,
+                    userAgent: scope === "grok_build" ? "" : (batchForm.userAgent === "" || batchForm.userAgent === previousDefault ? nextDefault : batchForm.userAgent),
+                    cloudflareCookies: scope === "grok_build" ? "" : batchForm.cloudflareCookies,
+                  });
+                }}
+              >
+                <SelectTrigger className="border-transparent"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="grok_build">{t("settings.egress.scopeBuild")}</SelectItem>
+                  <SelectItem value="grok_web">{t("settings.egress.scopeWeb")}</SelectItem>
+                  <SelectItem value="grok_console">{t("console.name")}</SelectItem>
+                  <SelectItem value="grok_web_asset">{t("settings.egress.scopeWebAsset")}</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label={t("proxies.enabled")}>
+              <div className="flex h-9 items-center">
+                <Switch checked={batchForm.enabled} onCheckedChange={(enabled) => setBatchForm({ ...batchForm, enabled })} />
+              </div>
+            </Field>
+            <Field label={t("proxies.proxyList")} className="sm:col-span-2">
+              <Textarea
+                className="min-h-40 border-transparent font-mono text-xs"
+                placeholder={"socks5h://user:pass@host:1080\nvmess://...\nhttps://proxy.example:8443"}
+                value={batchForm.proxyText}
+                onChange={(event) => setBatchForm({ ...batchForm, proxyText: event.target.value })}
+              />
+              <p className="text-[11px] text-muted-foreground">{t("proxies.batchProxyHint")}</p>
+            </Field>
+            {batchForm.scope !== "grok_build" ? (
+              <Field label={t("proxies.userAgent")} className="sm:col-span-2">
+                <Input className="border-transparent" value={batchForm.userAgent} onChange={(event) => setBatchForm({ ...batchForm, userAgent: event.target.value })} />
+              </Field>
+            ) : null}
+            {batchForm.scope !== "grok_build" ? (
+              <Field label={t("proxies.cloudflareCookie")} className="sm:col-span-2">
+                <Input
+                  className="border-transparent"
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder="cf_clearance=...; __cf_bm=..."
+                  value={batchForm.cloudflareCookies}
+                  onChange={(event) => setBatchForm({ ...batchForm, cloudflareCookies: event.target.value })}
+                />
+              </Field>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => { setBatchOpen(false); setBatchForm(emptyBatch); }}>{t("common.cancel")}</Button>
+            <Button type="button" disabled={batchCount < 1 || batchImport.isPending} onClick={() => batchImport.mutate()}>
+              {batchImport.isPending ? <Spinner className="size-3.5" /> : null}
+              {t("proxies.batchImportAction", { count: batchCount })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={editing !== undefined} onOpenChange={(open) => { if (!open) setEditing(undefined); }}>
         <DialogContent className="max-h-[90vh] overflow-y-auto">

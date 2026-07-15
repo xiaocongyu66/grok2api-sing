@@ -2,12 +2,15 @@ export type ApiDecoder<T> = (value: unknown) => T;
 export type ValueValidator = (value: unknown) => boolean;
 
 export const isString: ValueValidator = (value) => typeof value === "string";
+/** Accepts finite numbers or numeric strings (backend often uses json:",string"). */
+export const isStringOrNumber: ValueValidator = (value) =>
+  (typeof value === "string" && value.length > 0) || (typeof value === "number" && Number.isFinite(value));
 export const isNumber: ValueValidator = (value) => typeof value === "number" && Number.isFinite(value);
 export const isBoolean: ValueValidator = (value) => typeof value === "boolean";
 export const isObject: ValueValidator = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
 export function isOptional(validator: ValueValidator): ValueValidator {
-  return (value) => value === undefined || validator(value);
+  return (value) => value === undefined || value === null || validator(value);
 }
 
 export function isArrayOf(validator: ValueValidator): ValueValidator {

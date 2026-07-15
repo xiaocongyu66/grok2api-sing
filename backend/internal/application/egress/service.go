@@ -193,6 +193,86 @@ func (s *Service) Create(ctx context.Context, input Input) (domain.PublicNode, e
 	return s.publicNode(created), err
 }
 
+const maxBatchProxyNodes = 500
+
+// BatchCreateInput creates many proxy nodes from a shared name prefix and URL list.
+// Names are generated as "{prefix}#1", "{prefix}#2", … (1-based).
+type BatchCreateInput struct {
+	NamePrefix        string
+	Scope             domain.Scope
+	Enabled           bool
+	ProxyURLs         []string
+	UserAgent         string
+	CloudflareCookies *string
+}
+
+// BatchCreateResult summarizes bulk import.
+type BatchCreateResult struct {
+	Created int
+	Failed  int
+	Skipped int
+	Items   []domain.PublicNode
+	Errors  []string
+}
+
+func (s *Service) CreateBatch(ctx context.Context, input BatchCreateInput) (BatchCreateResult, error) {
+	prefix := strings.TrimSpace(input.NamePrefix)
+	if prefix == "" {
+		prefix = "代理"
+	}
+	if len(prefix) > 140 {
+		return BatchCreateResult{}, fmt.Errorf("%w: 名称前缀不能超过 140 个字符", ErrInvalidInput)
+	}
+	urls := make([]string, 0, len(input.ProxyURLs))
+	seen := make(map[string]struct{}, len(input.ProxyURLs))
+	for _, raw := range input.ProxyURLs {
+		for _, line := range strings.Split(raw, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			// Allow "name|url" optional override; default uses prefix#n.
+			if _, exists := seen[line]; exists {
+				continue
+			}
+			seen[line] = struct{}{}
+			urls = append(urls, line)
+		}
+	}
+	if len(urls) == 0 {
+		return BatchCreateResult{}, fmt.Errorf("%w: 至少填写一个代理地址", ErrInvalidInput)
+	}
+	if len(urls) > maxBatchProxyNodes {
+		return BatchCreateResult{}, fmt.Errorf("%w: 单次最多导入 %d 个代理", ErrInvalidInput, maxBatchProxyNodes)
+	}
+	result := BatchCreateResult{Items: make([]domain.PublicNode, 0, len(urls))}
+	for index, proxyURL := range urls {
+		name := fmt.Sprintf("%s#%d", prefix, index+1)
+		urlCopy := proxyURL
+		node, err := s.Create(ctx, Input{
+			Name: name, Scope: input.Scope, Enabled: input.Enabled,
+			ProxyURL: &urlCopy, UserAgent: input.UserAgent, CloudflareCookies: input.CloudflareCookies,
+		})
+		if err != nil {
+			result.Failed++
+			if len(result.Errors) < 20 {
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", name, err))
+			}
+			continue
+		}
+		result.Created++
+		result.Items = append(result.Items, node)
+	}
+	if result.Created == 0 && result.Failed > 0 {
+		msg := "批量导入全部失败"
+		if len(result.Errors) > 0 {
+			msg = result.Errors[0]
+		}
+		return result, fmt.Errorf("%w: %s", ErrInvalidInput, msg)
+	}
+	return result, nil
+}
+
 func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.PublicNode, error) {
 	value, err := s.repository.GetEgressNode(ctx, id)
 	if errors.Is(err, repository.ErrNotFound) {

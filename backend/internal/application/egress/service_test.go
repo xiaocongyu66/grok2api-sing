@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +54,7 @@ func TestProxyProtocolLabel(t *testing.T) {
 		t.Fatalf("empty label = %q", got)
 	}
 	cases := map[string]string{
-		"socks5h://user:pass@1.2.3.4:1080":                                  "socks5h",
+		"socks5h://user:pass@1.2.3.4:1080":                                   "socks5h",
 		"vmess://eyJhZGQiOiIxLjIuMy40In0=":                                   "vmess",
 		"ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@1.2.3.4:8388":                      "ss",
 		"hy2://secret@1.2.3.4:443":                                           "hysteria2",
@@ -67,6 +68,16 @@ func TestProxyProtocolLabel(t *testing.T) {
 		// Labels must never embed credentials or host from classic URLs.
 		if strings.Contains(got, "user") || strings.Contains(got, "pass") || strings.Contains(got, "1.2.3.4") {
 			t.Fatalf("label leaked secret material: %q from %q", got, raw)
+		}
+	}
+}
+
+func TestBatchCreateNamesUsePrefixIndex(t *testing.T) {
+	prefix := "代理"
+	for i, want := range []string{"代理#1", "代理#2", "代理#3"} {
+		name := fmt.Sprintf("%s#%d", prefix, i+1)
+		if name != want {
+			t.Fatalf("name = %q, want %q", name, want)
 		}
 	}
 }

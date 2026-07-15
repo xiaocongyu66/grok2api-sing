@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
@@ -21,6 +22,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-nodes", h.list)
 	router.GET("/egress-nodes/report", h.report)
 	router.POST("/egress-nodes/test", h.testAll)
+	router.POST("/egress-nodes/batch", h.createBatch)
 	router.POST("/egress-nodes/:id/test", h.testOne)
 	router.POST("/egress-nodes", h.create)
 	router.PUT("/egress-nodes/:id", h.update)
@@ -36,6 +38,17 @@ type nodeRequest struct {
 	UserAgent         string  `json:"userAgent"`
 	CloudflareCookies *string `json:"cloudflareCookies"`
 	ClearCookies      bool    `json:"clearCookies"`
+}
+
+type batchNodeRequest struct {
+	NamePrefix        string   `json:"namePrefix"`
+	Name              string   `json:"name"` // alias for namePrefix
+	Scope             string   `json:"scope"`
+	Enabled           *bool    `json:"enabled"`
+	ProxyURLs         []string `json:"proxyURLs"`
+	ProxyText         string   `json:"proxyText"` // multiline paste
+	UserAgent         string   `json:"userAgent"`
+	CloudflareCookies *string  `json:"cloudflareCookies"`
 }
 
 type nodeResponse struct {
@@ -185,6 +198,42 @@ func (h *Handler) create(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusCreated, newNodeResponse(value))
+}
+
+func (h *Handler) createBatch(c *gin.Context) {
+	var request batchNodeRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	enabled := true
+	if request.Enabled != nil {
+		enabled = *request.Enabled
+	}
+	urls := append([]string{}, request.ProxyURLs...)
+	if text := strings.TrimSpace(request.ProxyText); text != "" {
+		urls = append(urls, text)
+	}
+	prefix := strings.TrimSpace(request.NamePrefix)
+	if prefix == "" {
+		prefix = strings.TrimSpace(request.Name)
+	}
+	result, err := h.service.CreateBatch(c.Request.Context(), egressapp.BatchCreateInput{
+		NamePrefix: prefix, Scope: egressdomain.Scope(request.Scope), Enabled: enabled,
+		ProxyURLs: urls, UserAgent: request.UserAgent, CloudflareCookies: request.CloudflareCookies,
+	})
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	items := make([]nodeResponse, 0, len(result.Items))
+	for _, value := range result.Items {
+		items = append(items, newNodeResponse(value))
+	}
+	response.Success(c, http.StatusCreated, gin.H{
+		"created": result.Created, "failed": result.Failed, "skipped": result.Skipped,
+		"errors": result.Errors, "items": items,
+	})
 }
 
 func (h *Handler) update(c *gin.Context) {

@@ -1,5 +1,18 @@
 import { apiRequest } from "@/shared/api/client";
-import { createObjectDecoder, decodeBooleanResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isString } from "@/shared/api/decoder";
+import {
+  createObjectDecoder,
+  decodeBooleanResult,
+  hasShape,
+  isArrayOf,
+  isBoolean,
+  isNumber,
+  isObject,
+  isOneOf,
+  isOptional,
+  isString,
+  isStringOrNumber,
+  type ApiDecoder,
+} from "@/shared/api/decoder";
 import type { SortOrder } from "@/shared/lib/table-sort";
 
 export type SettingsConfigDTO = {
@@ -44,8 +57,147 @@ export type EgressNodeInput = {
   clearProxyURL?: boolean; userAgent: string; cloudflareCookies?: string; clearCookies?: boolean;
 };
 
+export type EgressBatchImportInput = {
+  namePrefix: string;
+  scope: EgressScope;
+  enabled: boolean;
+  proxyText: string;
+  userAgent?: string;
+  cloudflareCookies?: string;
+};
+
+export type EgressBatchImportResultDTO = {
+  created: number;
+  failed: number;
+  skipped: number;
+  errors: string[];
+  items: EgressNodeDTO[];
+};
+
 export type EgressScope = "grok_build" | "grok_web" | "grok_console" | "grok_web_asset";
 export type EgressNodeListDTO = { items: EgressNodeDTO[]; defaultUserAgents: Record<EgressScope, string> };
+
+/** Known scopes; unknown values are mapped to grok_web so one bad row cannot blank the whole list. */
+export const EGRESS_SCOPES = ["grok_build", "grok_web", "grok_console", "grok_web_asset"] as const;
+
+function coerceString(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return fallback;
+}
+
+function coerceNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function coerceBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value;
+  return fallback;
+}
+
+function coerceScope(value: unknown): EgressScope {
+  if (typeof value === "string" && (EGRESS_SCOPES as readonly string[]).includes(value)) {
+    return value as EgressScope;
+  }
+  // Legacy / unknown scopes: keep list visible rather than failing the entire page.
+  return "grok_web";
+}
+
+function normalizeEgressNode(raw: unknown): EgressNodeDTO | null {
+  if (!isObject(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const id = coerceString(record.id);
+  const name = coerceString(record.name);
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    scope: coerceScope(record.scope),
+    enabled: coerceBoolean(record.enabled, true),
+    proxyConfigured: coerceBoolean(record.proxyConfigured),
+    proxyProtocol: typeof record.proxyProtocol === "string" ? record.proxyProtocol : undefined,
+    userAgent: coerceString(record.userAgent),
+    cookieConfigured: coerceBoolean(record.cookieConfigured),
+    health: coerceNumber(record.health, 1),
+    failureCount: coerceNumber(record.failureCount),
+    cooldownUntil: typeof record.cooldownUntil === "string" ? record.cooldownUntil : undefined,
+    lastError: typeof record.lastError === "string" ? record.lastError : undefined,
+    successCount: coerceNumber(record.successCount),
+    requestCount: coerceNumber(record.requestCount),
+    successRate: coerceNumber(record.successRate),
+    failureRate: coerceNumber(record.failureRate),
+    inflight: coerceNumber(record.inflight),
+    lastProbeAt: typeof record.lastProbeAt === "string" ? record.lastProbeAt : undefined,
+    lastProbeOK: typeof record.lastProbeOK === "boolean" ? record.lastProbeOK : undefined,
+    lastProbeMs: typeof record.lastProbeMs === "number" ? record.lastProbeMs : undefined,
+    lastProbeError: typeof record.lastProbeError === "string" ? record.lastProbeError : undefined,
+  };
+}
+
+function normalizeDefaultUserAgents(raw: unknown): Record<EgressScope, string> {
+  const record = isObject(raw) ? (raw as Record<string, unknown>) : {};
+  return {
+    grok_build: coerceString(record.grok_build),
+    grok_web: coerceString(record.grok_web),
+    grok_console: coerceString(record.grok_console),
+    grok_web_asset: coerceString(record.grok_web_asset ?? record.grok_web),
+  };
+}
+
+const decodeEgressNodeResilient: ApiDecoder<EgressNodeDTO> = (value) => {
+  const node = normalizeEgressNode(value);
+  if (!node) throw new Error("egress node response shape is invalid");
+  return node;
+};
+
+const decodeEgressNodeListResilient: ApiDecoder<EgressNodeListDTO> = (value) => {
+  if (!isObject(value)) throw new Error("egress node list response shape is invalid");
+  const record = value as Record<string, unknown>;
+  const itemsRaw = Array.isArray(record.items) ? record.items : [];
+  const items = itemsRaw.map(normalizeEgressNode).filter((item): item is EgressNodeDTO => item !== null);
+  return { items, defaultUserAgents: normalizeDefaultUserAgents(record.defaultUserAgents) };
+};
+
+const decodeEgressReportResilient: ApiDecoder<EgressReportDTO> = (value) => {
+  if (!isObject(value)) throw new Error("egress report response shape is invalid");
+  const record = value as Record<string, unknown>;
+  const itemsRaw = Array.isArray(record.items) ? record.items : [];
+  const items = itemsRaw.map(normalizeEgressNode).filter((item): item is EgressNodeDTO => item !== null);
+  return {
+    totalNodes: coerceNumber(record.totalNodes),
+    enabledNodes: coerceNumber(record.enabledNodes),
+    proxyNodes: coerceNumber(record.proxyNodes),
+    healthyNodes: coerceNumber(record.healthyNodes),
+    successCount: coerceNumber(record.successCount),
+    failureCount: coerceNumber(record.failureCount),
+    requestCount: coerceNumber(record.requestCount),
+    successRate: coerceNumber(record.successRate),
+    failureRate: coerceNumber(record.failureRate),
+    items,
+  };
+};
+
+const decodeEgressBatchImport: ApiDecoder<EgressBatchImportResultDTO> = (value) => {
+  if (!isObject(value)) throw new Error("egress batch import response shape is invalid");
+  const record = value as Record<string, unknown>;
+  const itemsRaw = Array.isArray(record.items) ? record.items : [];
+  const items = itemsRaw.map(normalizeEgressNode).filter((item): item is EgressNodeDTO => item !== null);
+  const errors = Array.isArray(record.errors)
+    ? record.errors.filter((item): item is string => typeof item === "string")
+    : [];
+  return {
+    created: coerceNumber(record.created),
+    failed: coerceNumber(record.failed),
+    skipped: coerceNumber(record.skipped),
+    errors,
+    items,
+  };
+};
 
 export type EgressReportDTO = {
   totalNodes: number; enabledNodes: number; proxyNodes: number; healthyNodes: number;
@@ -98,36 +250,15 @@ const decodeSettingsSnapshot = createObjectDecoder<SettingsSnapshotDTO>("setting
   revision: isString,
   restartRequired: isArrayOf(isString),
 });
-const egressScopeValidator = isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset");
-const egressNodeValidator = hasShape({
-  id: isString, name: isString, scope: egressScopeValidator, enabled: isBoolean,
-  proxyConfigured: isBoolean, proxyProtocol: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
-  cooldownUntil: isOptional(isString), lastError: isOptional(isString),
-  successCount: isNumber, requestCount: isNumber, successRate: isNumber, failureRate: isNumber, inflight: isNumber,
-  lastProbeAt: isOptional(isString), lastProbeOK: isOptional(isBoolean), lastProbeMs: isOptional(isNumber), lastProbeError: isOptional(isString),
-});
-const decodeEgressNode = createObjectDecoder<EgressNodeDTO>("egress node", {
-  id: isString, name: isString, scope: egressScopeValidator, enabled: isBoolean,
-  proxyConfigured: isBoolean, proxyProtocol: isOptional(isString), userAgent: isString, cookieConfigured: isBoolean, health: isNumber, failureCount: isNumber,
-  cooldownUntil: isOptional(isString), lastError: isOptional(isString),
-  successCount: isNumber, requestCount: isNumber, successRate: isNumber, failureRate: isNumber, inflight: isNumber,
-  lastProbeAt: isOptional(isString), lastProbeOK: isOptional(isBoolean), lastProbeMs: isOptional(isNumber), lastProbeError: isOptional(isString),
-});
-const decodeEgressNodeList = createObjectDecoder<EgressNodeListDTO>("egress node list", {
-  items: isArrayOf(egressNodeValidator),
-  defaultUserAgents: hasShape({ grok_build: isString, grok_web: isString, grok_console: isString, grok_web_asset: isString }),
-});
-const decodeEgressReport = createObjectDecoder<EgressReportDTO>("egress report", {
-  totalNodes: isNumber, enabledNodes: isNumber, proxyNodes: isNumber, healthyNodes: isNumber,
-  successCount: isNumber, failureCount: isNumber, requestCount: isNumber, successRate: isNumber, failureRate: isNumber,
-  items: isArrayOf(egressNodeValidator),
-});
+// Keep strict-ish probe validators; list/report use resilient normalizers so one
+// unexpected field (or historical scope typo) cannot blank the entire page.
+const egressScopeValidator = isOneOf(...EGRESS_SCOPES);
 const egressProbeValidator = hasShape({
-  nodeId: isString, name: isString, scope: egressScopeValidator, ok: isBoolean,
+  nodeId: isStringOrNumber, name: isString, scope: egressScopeValidator, ok: isBoolean,
   latencyMs: isNumber, status: isOptional(isNumber), error: isOptional(isString), proxyUsed: isBoolean, checkedAt: isString,
 });
 const decodeEgressProbe = createObjectDecoder<EgressProbeDTO>("egress probe", {
-  nodeId: isString, name: isString, scope: egressScopeValidator, ok: isBoolean,
+  nodeId: isStringOrNumber, name: isString, scope: egressScopeValidator, ok: isBoolean,
   latencyMs: isNumber, status: isOptional(isNumber), error: isOptional(isString), proxyUsed: isBoolean, checkedAt: isString,
 });
 const decodeEgressProbeBatch = createObjectDecoder<EgressProbeBatchDTO>("egress probe batch", {
@@ -150,12 +281,12 @@ export function listEgressNodes(input?: { sortBy?: string; sortOrder?: SortOrder
   }
   if (input?.scope) query.set("scope", input.scope);
   const suffix = query.size > 0 ? `?${query}` : "";
-  return apiRequest(`/api/admin/v1/egress-nodes${suffix}`, {}, decodeEgressNodeList);
+  return apiRequest(`/api/admin/v1/egress-nodes${suffix}`, {}, decodeEgressNodeListResilient);
 }
 
 export function getEgressReport(scope?: EgressScope): Promise<EgressReportDTO> {
   const suffix = scope ? `?scope=${encodeURIComponent(scope)}` : "";
-  return apiRequest(`/api/admin/v1/egress-nodes/report${suffix}`, {}, decodeEgressReport);
+  return apiRequest(`/api/admin/v1/egress-nodes/report${suffix}`, {}, decodeEgressReportResilient);
 }
 
 export function testEgressNode(id: string): Promise<EgressProbeDTO> {
@@ -168,11 +299,25 @@ export function testAllEgressNodes(scope?: EgressScope): Promise<EgressProbeBatc
 }
 
 export function createEgressNode(input: EgressNodeInput): Promise<EgressNodeDTO> {
-  return apiRequest("/api/admin/v1/egress-nodes", { method: "POST", body: input }, decodeEgressNode);
+  return apiRequest("/api/admin/v1/egress-nodes", { method: "POST", body: input }, decodeEgressNodeResilient);
+}
+
+export function createEgressNodesBatch(input: EgressBatchImportInput): Promise<EgressBatchImportResultDTO> {
+  return apiRequest("/api/admin/v1/egress-nodes/batch", {
+    method: "POST",
+    body: {
+      namePrefix: input.namePrefix,
+      scope: input.scope,
+      enabled: input.enabled,
+      proxyText: input.proxyText,
+      userAgent: input.userAgent ?? "",
+      cloudflareCookies: input.cloudflareCookies,
+    },
+  }, decodeEgressBatchImport);
 }
 
 export function updateEgressNode(id: string, input: EgressNodeInput): Promise<EgressNodeDTO> {
-  return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "PUT", body: input }, decodeEgressNode);
+  return apiRequest(`/api/admin/v1/egress-nodes/${id}`, { method: "PUT", body: input }, decodeEgressNodeResilient);
 }
 
 export function deleteEgressNode(id: string): Promise<{ deleted: boolean }> {
