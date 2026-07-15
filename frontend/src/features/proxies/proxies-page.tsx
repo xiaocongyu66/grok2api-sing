@@ -214,25 +214,26 @@ export function ProxiesPage() {
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+      <header className="flex flex-col gap-4">
         <div className="min-w-0">
           <h1 className="text-xl font-medium">{t("proxies.title")}</h1>
           <p className="mt-1 text-xs text-muted-foreground">{t("proxies.description")}</p>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <Button type="button" size="sm" variant="outline" disabled={testAll.isPending || nodes.length === 0} onClick={() => testAll.mutate()}>
+        {/* Phone: fixed 2×2 rows so actions never overflow the viewport; desktop: single row. */}
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end">
+          <Button type="button" size="sm" variant="outline" className="w-full justify-center sm:w-auto" disabled={testAll.isPending || nodes.length === 0} onClick={() => testAll.mutate()}>
             {testAll.isPending ? <Spinner className="size-3.5" /> : <Zap className="size-3.5" />}
             {t("proxies.testAll")}
           </Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => { void listQuery.refetch(); void reportQuery.refetch(); }}>
+          <Button type="button" size="sm" variant="outline" className="w-full justify-center sm:w-auto" onClick={() => { void listQuery.refetch(); void reportQuery.refetch(); }}>
             <RefreshCw className={cn("size-3.5", (listQuery.isFetching || reportQuery.isFetching) && "animate-spin")} />
             {t("common.refresh")}
           </Button>
-          <Button type="button" size="sm" variant="outline" onClick={openBatch}>
+          <Button type="button" size="sm" variant="outline" className="w-full justify-center sm:w-auto" onClick={openBatch}>
             <FileUp className="size-3.5" />
             {t("proxies.batchImport")}
           </Button>
-          <Button type="button" size="sm" variant="secondary" onClick={openCreate}>
+          <Button type="button" size="sm" variant="secondary" className="w-full justify-center sm:w-auto" onClick={openCreate}>
             <Plus className="size-3.5" />
             {t("proxies.add")}
           </Button>
