@@ -10,6 +10,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { listModels } from "@/entities/model/model-api";
+import { RequestAuditDetailDialog } from "@/features/audits/request-audit-detail-dialog";
 import { getRequestAudits, getRequestAuditSummary, type AuditDTO, type AuditPeriod } from "@/features/audits/request-audits-api";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
@@ -36,6 +37,7 @@ export function RequestAuditsPage() {
   const [periodDays, setPeriodDays] = useState<PeriodDays>(1);
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [manualRefreshing, setManualRefreshing] = useState(false);
+  const [detailAudit, setDetailAudit] = useState<AuditDTO | null>(null);
   const forceSummaryRefresh = useRef(false);
   const debouncedSearch = useDebouncedValue(search);
   const debouncedKeyFilter = useDebouncedValue(keyFilter);
@@ -134,8 +136,8 @@ export function RequestAuditsPage() {
                   { value: "5xx", label: `5xx · ${t("audits.statusServerError")}` },
                 ] },
                 { id: "mode", label: t("audits.mode"), value: modeFilter, onChange: (value) => { setModeFilter(value); setCursors([""]); }, options: [
-                  { value: "stream", label: "Stream" },
-                  { value: "nonStream", label: "Non-Stream" },
+                  { value: "stream", label: t("audits.stream") },
+                  { value: "nonStream", label: t("audits.nonStream") },
                 ] },
                 { id: "key", type: "text", label: t("audits.key"), value: keyFilter, placeholder: t("audits.keyFilterPlaceholder"), onChange: (value) => { setKeyFilter(value); setCursors([""]); } },
                 { id: "account", type: "text", label: t("audits.account"), value: accountFilter, placeholder: t("audits.accountFilterPlaceholder"), onChange: (value) => { setAccountFilter(value); setCursors([""]); } },
@@ -188,7 +190,20 @@ export function RequestAuditsPage() {
             </TableHeader>
             <TableBody>
               {auditsQuery.isPending ? <TableLoadingRow colSpan={10} /> : result?.items.map((audit) => (
-                <TableRow key={audit.id}>
+                <TableRow
+                  key={audit.id}
+                  className="cursor-pointer"
+                  onClick={() => setDetailAudit(audit)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setDetailAudit(audit);
+                    }
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={t("audits.detailTitle")}
+                >
                   <TableCell className="py-3">
                     <span className="block truncate text-xs" title={audit.requestId}>{audit.requestId}</span>
                   </TableCell>
@@ -209,7 +224,7 @@ export function RequestAuditsPage() {
                   <TableCell className="py-3"><BillingValue audit={audit} /></TableCell>
                   <TableCell className="py-3"><UsageDetails audit={audit} locale={i18n.language} /></TableCell>
                   <TableCell className="py-3 text-center"><AuditStatus statusCode={audit.statusCode} errorCode={audit.errorCode} /></TableCell>
-                  <TableCell className="py-3 text-center"><Badge variant="outline" className="whitespace-nowrap font-normal">{audit.streaming ? "Stream" : "Non-Stream"}</Badge></TableCell>
+                  <TableCell className="py-3 text-center"><Badge variant="outline" className="whitespace-nowrap font-normal">{audit.streaming ? t("audits.stream") : t("audits.nonStream")}</Badge></TableCell>
                   <TableCell className="whitespace-nowrap py-3 text-xs tabular-nums">{formatNumber(audit.durationMs, i18n.language)} ms</TableCell>
                   <TableCell className="whitespace-nowrap py-3 text-xs text-muted-foreground">{formatDateTime(audit.createdAt, i18n.language)}</TableCell>
                 </TableRow>
@@ -218,6 +233,12 @@ export function RequestAuditsPage() {
           </Table>
         ) : null}
       </DataTableShell>
+
+      <RequestAuditDetailDialog
+        audit={detailAudit}
+        open={detailAudit !== null}
+        onOpenChange={(open) => { if (!open) setDetailAudit(null); }}
+      />
     </div>
   );
 }
