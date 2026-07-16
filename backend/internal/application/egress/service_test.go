@@ -65,7 +65,6 @@ func TestProxyProtocolLabel(t *testing.T) {
 		if got != want {
 			t.Fatalf("ProxyProtocolLabel(%q) = %q, want %q", raw, got, want)
 		}
-		// Labels must never embed credentials or host from classic URLs.
 		if strings.Contains(got, "user") || strings.Contains(got, "pass") || strings.Contains(got, "1.2.3.4") {
 			t.Fatalf("label leaked secret material: %q from %q", got, raw)
 		}
@@ -78,6 +77,29 @@ func TestBatchCreateNamesUsePrefixIndex(t *testing.T) {
 		name := fmt.Sprintf("%s#%d", prefix, i+1)
 		if name != want {
 			t.Fatalf("name = %q, want %q", name, want)
+		}
+	}
+}
+
+func TestNormalizeProxyURLAllowsAccountPlaceholderOnlyInUsername(t *testing.T) {
+	value, err := NormalizeProxyURL("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "socks5h://Default.%7Baccount%7D:token@resin:2260" && value != "socks5h://Default.{account}:token@resin:2260" {
+		t.Fatalf("normalized Resin proxy = %q", value)
+	}
+	if !strings.Contains(value, ProxyAccountPlaceholder) {
+		t.Fatalf("account placeholder was lost: %q", value)
+	}
+	for _, invalid := range []string{
+		"socks5h://user:token@{account}:2260",
+		"socks5h://user:{account}@resin:2260",
+		"socks5h://{account}:{account}@resin:2260",
+		"socks5h://grok2api_account_placeholder:token@{account}:2260",
+	} {
+		if _, err := NormalizeProxyURL(invalid); err == nil {
+			t.Fatalf("invalid account placeholder accepted: %q", invalid)
 		}
 	}
 }

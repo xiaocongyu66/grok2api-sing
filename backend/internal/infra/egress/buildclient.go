@@ -1,11 +1,14 @@
 package egress
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	xproxy "golang.org/x/net/proxy"
 )
 
 // newBuildClient keeps Grok Build on the standard Go HTTP/TLS stack used by
@@ -70,4 +73,33 @@ func (c *closingClient) Do(request *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("出口客户端未初始化")
 	}
 	return c.Client.Do(request)
+}
+
+func dialContext(dialer xproxy.Dialer) func(context.Context, string, string) (net.Conn, error) {
+	if contextual, ok := dialer.(xproxy.ContextDialer); ok {
+		return contextual.DialContext
+	}
+	type result struct {
+		connection net.Conn
+		err        error
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		completed := make(chan result, 1)
+		go func() {
+			connection, err := dialer.Dial(network, address)
+			completed <- result{connection: connection, err: err}
+		}()
+		select {
+		case value := <-completed:
+			return value.connection, value.err
+		case <-ctx.Done():
+			go func() {
+				value := <-completed
+				if value.connection != nil {
+					_ = value.connection.Close()
+				}
+			}()
+			return nil, ctx.Err()
+		}
+	}
 }

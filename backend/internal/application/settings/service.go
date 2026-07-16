@@ -272,6 +272,7 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 }
 
 func applyDomainConfig(base config.Config, value settingsdomain.Config) config.Config {
+	// 旧版运行设置没有 Server 字段，反序列化后为零；升级时沿用当前配置默认值。
 	if value.Server.MaxConcurrentRequests > 0 {
 		base.Server.MaxConcurrentRequests = value.Server.MaxConcurrentRequests
 	}
@@ -293,7 +294,8 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 		RecoveryBackoffBase: config.Duration(value.ProviderWeb.RecoveryBackoffBase), RecoveryBackoffMax: config.Duration(value.ProviderWeb.RecoveryBackoffMax),
 	}
-	if strings.TrimSpace(value.ProviderConsole.BaseURL) != "" {
+	// Console 是后续版本新增的完整配置段；旧 JSON 整段缺失时沿用代码默认值。
+	if value.ProviderConsole != (settingsdomain.ProviderConsoleConfig{}) {
 		base.Provider.Console = config.ConsoleProviderConfig{
 			BaseURL: value.ProviderConsole.BaseURL, UserAgent: value.ProviderConsole.UserAgent,
 			ChatTimeout: config.Duration(value.ProviderConsole.ChatTimeout),

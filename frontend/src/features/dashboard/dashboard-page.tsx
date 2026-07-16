@@ -9,6 +9,7 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { getDashboard, type DashboardPeriod, type DashboardDTO } from "@/features/dashboard/dashboard-api";
+import { VersionUpdateBanner } from "@/features/system/version-update";
 import { useAuth } from "@/shared/auth/use-auth";
 import { ErrorState } from "@/shared/components/data-state";
 import { PeriodSelector } from "@/shared/components/period-selector";
@@ -178,6 +179,8 @@ export function DashboardPage() {
           </div>
         ) : null}
       </header>
+
+      <VersionUpdateBanner />
 
       <section className="space-y-4">
         <div className="flex items-center justify-between gap-3">

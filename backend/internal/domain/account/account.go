@@ -79,41 +79,42 @@ const (
 
 // Credential 表示持久化的上游 OAuth 账号。
 type Credential struct {
-	ID                    uint64
-	Provider              Provider
-	AuthType              AuthType
-	Name                  string
-	Email                 string
-	UserID                string
-	TeamID                string
-	SourceKey             string
-	OIDCClientID          string
-	EncryptedAccessToken  string
-	EncryptedRefreshToken string
-	ExpiresAt             time.Time
-	RefreshDueAt          *time.Time
-	LastRefreshAt         *time.Time
-	RefreshFailureCount   int
-	LastRefreshErrorCode  string
-	RefreshPermanent      bool
-	Enabled               bool
-	AuthStatus            AuthStatus
-	Priority              int
-	MaxConcurrent         int
-	MinimumRemaining      float64
-	FailureCount          int
-	CooldownUntil         *time.Time
-	LastError             string
-	LastUsedAt            *time.Time
-	ObservedModel         string
-	ObservedModelAt       *time.Time
-	WebTier               WebTier
-	WebTierSyncedAt       *time.Time
-	LinkedAccountID       uint64
-	LinkedAccountName     string
-	LinkedProvider        Provider
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	ID                        uint64
+	Provider                  Provider
+	AuthType                  AuthType
+	Name                      string
+	Email                     string
+	UserID                    string
+	TeamID                    string
+	SourceKey                 string
+	OIDCClientID              string
+	EncryptedAccessToken      string
+	EncryptedRefreshToken     string
+	EncryptedCloudflareCookie string
+	ExpiresAt                 time.Time
+	RefreshDueAt              *time.Time
+	LastRefreshAt             *time.Time
+	RefreshFailureCount       int
+	LastRefreshErrorCode      string
+	RefreshPermanent          bool
+	Enabled                   bool
+	AuthStatus                AuthStatus
+	Priority                  int
+	MaxConcurrent             int
+	MinimumRemaining          float64
+	FailureCount              int
+	CooldownUntil             *time.Time
+	LastError                 string
+	LastUsedAt                *time.Time
+	ObservedModel             string
+	ObservedModelAt           *time.Time
+	WebTier                   WebTier
+	WebTierSyncedAt           *time.Time
+	LinkedAccountID           uint64
+	LinkedAccountName         string
+	LinkedProvider            Provider
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 // CredentialRefreshDueAt 将账号稳定地分散到到期前 5~8 分钟，避免同批导入账号同时刷新。
@@ -178,6 +179,9 @@ type QuotaRecoveryEvent struct {
 type BillingHistoryEntry struct {
 	Year         int
 	Month        int
+	PeriodType   string
+	PeriodStart  string
+	PeriodEnd    string
 	IncludedUsed float64
 	OnDemandUsed float64
 	TotalUsed    float64
@@ -195,6 +199,7 @@ type Billing struct {
 	PrepaidBalance       float64
 	CreditUsagePercent   float64
 	IsUnifiedBillingUser bool
+	OnDemandEnabled      *bool
 	TopUpMethod          string
 	UsagePeriodType      string
 	UsagePeriodStart     string

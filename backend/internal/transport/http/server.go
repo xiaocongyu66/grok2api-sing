@@ -18,6 +18,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
@@ -69,6 +70,7 @@ type Dependencies struct {
 	Media        *mediaapp.Service
 	Settings     *settingsapp.Service
 	Egress       *egressapp.Service
+	Updates      *updatecheckapp.Service
 }
 
 type ReadinessComponent struct {
@@ -169,7 +171,7 @@ func New(deps Dependencies) *gin.Engine {
 			return deps.Settings.PublicAPIBaseURL()
 		}
 		return deps.PublicAPIBaseURL
-	}).Register(adminProtected)
+	}, deps.Updates).Register(adminProtected)
 
 	v1 := router.Group("/v1")
 	v1.Use(deps.ConcurrencyGate.Middleware())

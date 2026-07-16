@@ -9,16 +9,56 @@ import (
 
 	fhttp "github.com/bogdanfinn/fhttp"
 
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 func TestDirectFallbackRebuildsClientAfterAntiBotRejection(t *testing.T) {
-	manager := &Manager{clients: map[uint64]cachedClient{0: {}}}
+	manager := &Manager{clients: map[clientCacheKey]cachedClient{{nodeID: 0, scope: domain.ScopeWeb, fingerprint: "web"}: {}}}
 	manager.Feedback(context.Background(), 0, http.StatusForbidden, nil)
-	if _, exists := manager.clients[0]; exists {
+	if len(manager.clients) != 0 {
 		t.Fatal("direct fallback client was not invalidated after anti-bot rejection")
+	}
+}
+
+func TestDirectBuildAndWebClientsDoNotEvictEachOther(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{}, cipher)
+	buildFirst, err := manager.Acquire(context.Background(), domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildFirst.Release()
+	web, err := manager.Acquire(context.Background(), domain.ScopeWeb, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer web.Release()
+	buildSecond, err := manager.Acquire(context.Background(), domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildSecond.Release()
+
+	if buildFirst.client != buildSecond.client {
+		t.Fatal("Web direct traffic evicted the reusable Build connection pool")
+	}
+	if buildFirst.client == web.client || len(manager.clients) != 2 {
+		t.Fatalf("direct clients were not isolated: build=%T web=%T cached=%d", buildFirst.client, web.client, len(manager.clients))
+	}
+	manager.FeedbackForScope(context.Background(), domain.ScopeWeb, 0, http.StatusForbidden, nil)
+	buildAfterWebFailure, err := manager.Acquire(context.Background(), domain.ScopeBuild, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buildAfterWebFailure.Release()
+	if buildAfterWebFailure.client != buildFirst.client || len(manager.clients) != 1 {
+		t.Fatalf("Web failure evicted Build direct client: reused=%v cached=%d", buildAfterWebFailure.client == buildFirst.client, len(manager.clients))
 	}
 }
 
@@ -58,9 +98,38 @@ func TestAcquireIfConfiguredDoesNotChangeBuildDirectTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewManager(egressRepositoryTestStub{}, cipher)
-	lease, configured, err := manager.AcquireIfConfigured(context.Background(), domain.ScopeBuild, "")
+	ctx, trace := WithTrace(context.Background())
+	lease, configured, err := manager.AcquireIfConfigured(ctx, domain.ScopeBuild, "")
 	if err != nil || configured || lease != nil {
 		t.Fatalf("lease=%#v configured=%v err=%v", lease, configured, err)
+	}
+	selection, ok := trace.Selection(domain.ScopeBuild)
+	if !ok || selection.NodeID != 0 || selection.NodeName != "direct" || selection.Proxied {
+		t.Fatalf("direct selection = %#v, ok=%v", selection, ok)
+	}
+}
+
+func TestTraceRecordsConfiguredProxyWithoutCredentials(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedProxy, err := cipher.Encrypt("socks5h://secret:password@127.0.0.1:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 42, Name: "primary-proxy", Scope: domain.ScopeBuild, Enabled: true, Health: 1, EncryptedProxyURL: encryptedProxy,
+	}}}, cipher)
+	ctx, trace := WithTrace(context.Background())
+	lease, configured, err := manager.AcquireIfConfigured(ctx, domain.ScopeBuild, "")
+	if err != nil || !configured || lease == nil {
+		t.Fatalf("lease=%#v configured=%v err=%v", lease, configured, err)
+	}
+	defer lease.Release()
+	selection, ok := trace.Selection(domain.ScopeBuild)
+	if !ok || selection.NodeID != 42 || selection.NodeName != "primary-proxy" || !selection.Proxied {
+		t.Fatalf("proxy selection = %#v, ok=%v", selection, ok)
 	}
 }
 
@@ -87,6 +156,7 @@ func TestConfiguredBuildNodeDoesNotOverrideProviderUserAgent(t *testing.T) {
 	if lease.UserAgent != "" {
 		t.Fatalf("build lease userAgent = %q", lease.UserAgent)
 	}
+	// Fork uses sing-box-backed closingClient; upstream uses plain *http.Client.
 	switch lease.client.(type) {
 	case *http.Client, *closingClient:
 	default:
@@ -118,6 +188,61 @@ func TestConfiguredWebNodeKeepsChromeBrowserTransport(t *testing.T) {
 	}
 }
 
+func TestAcquireCredentialRendersResinAccountAndOverridesNodeCookie(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeCookie, err := cipher.Encrypt("cf_clearance=node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountCookie, err := cipher.Encrypt("cf_clearance=account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1,
+		EncryptedProxyURL: proxyURL, EncryptedCloudflareCookie: nodeCookie,
+	}}}, cipher)
+	first, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 42, Provider: accountdomain.ProviderWeb, EncryptedCloudflareCookie: accountCookie,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	if first.ProxyURL != "socks5h://Default.grok_web_42:token@resin:2260" {
+		t.Fatalf("first proxy URL = %q", first.ProxyURL)
+	}
+	if first.CFCookies != "cf_clearance=account" || !first.sticky {
+		t.Fatalf("first lease cookie=%q sticky=%v", first.CFCookies, first.sticky)
+	}
+	second, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{
+		ID: 43, Provider: accountdomain.ProviderWeb,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+	if second.ProxyURL != "socks5h://Default.grok_web_43:token@resin:2260" {
+		t.Fatalf("second proxy URL = %q", second.ProxyURL)
+	}
+	if second.CFCookies != "cf_clearance=node" {
+		t.Fatalf("second lease cookie = %q", second.CFCookies)
+	}
+	if first.client == second.client {
+		t.Fatal("different Resin accounts unexpectedly shared one connection pool")
+	}
+	if len(manager.clients) != 2 {
+		t.Fatalf("cached Resin account pools = %d, want 2", len(manager.clients))
+	}
+}
+
 func TestBuildForbiddenDoesNotPoisonEgressNode(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -134,7 +259,7 @@ func TestBuildForbiddenDoesNotPoisonEgressNode(t *testing.T) {
 	if repository.updates != 0 || repository.node.Health != 1 || repository.node.LastError != "" {
 		t.Fatalf("build 403 poisoned node: updates=%d node=%#v", repository.updates, repository.node)
 	}
-	if _, exists := manager.clients[1]; !exists {
+	if !managerHasClientForNode(manager, 1) {
 		t.Fatal("build client was invalidated by an ambiguous 403")
 	}
 }
@@ -152,11 +277,33 @@ func TestWebForbiddenStillRebuildsBrowserSession(t *testing.T) {
 	}
 	lease.Release()
 	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
-	if repository.updates != 1 || repository.node.Health >= 1 || repository.node.LastError != "疑似反爬拒绝（403）" {
+	if repository.updates != 1 || repository.node.Health >= 1 || repository.node.LastError != "anti-bot rejection" {
 		t.Fatalf("web 403 feedback = updates=%d node=%#v", repository.updates, repository.node)
 	}
-	if _, exists := manager.clients[1]; exists {
+	if managerHasClientForNode(manager, 1) {
 		t.Fatal("web browser session was not invalidated after 403")
+	}
+}
+
+func TestStickyProxyForbiddenDoesNotCooldownSharedNode(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := cipher.Encrypt("socks5h://Default.{account}:token@resin:2260")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "resin", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: proxy}}
+	manager := NewManager(repository, cipher)
+	lease, err := manager.AcquireCredential(context.Background(), domain.ScopeWeb, accountdomain.Credential{ID: 42, Provider: accountdomain.ProviderWeb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Release()
+	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	if repository.updates != 0 || repository.node.Health != 1 || repository.node.LastError != "" {
+		t.Fatalf("sticky proxy 403 changed shared node: updates=%d node=%#v", repository.updates, repository.node)
 	}
 }
 
@@ -203,6 +350,17 @@ func TestEgressNodeSnapshotAvoidsRepeatedRepositoryReads(t *testing.T) {
 
 type egressRepositoryTestStub struct{ nodes []domain.Node }
 
+func managerHasClientForNode(manager *Manager, nodeID uint64) bool {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	for key := range manager.clients {
+		if key.nodeID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
 type countingEgressRepository struct {
 	egressRepositoryTestStub
 	calls int
@@ -214,7 +372,7 @@ type mutableEgressRepository struct {
 }
 
 func (r *mutableEgressRepository) ListEgressNodes(_ context.Context, scope domain.Scope, _ repository.SortQuery) ([]domain.Node, error) {
-	if scope != "" && !r.node.MatchesScope(scope) {
+	if scope != "" && r.node.Scope != scope {
 		return nil, nil
 	}
 	return []domain.Node{r.node}, nil
@@ -254,7 +412,7 @@ func (r *countingEgressRepository) ListEgressNodes(ctx context.Context, scope do
 func (s egressRepositoryTestStub) ListEgressNodes(_ context.Context, scope domain.Scope, _ repository.SortQuery) ([]domain.Node, error) {
 	values := make([]domain.Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
-		if scope == "" || node.MatchesScope(scope) {
+		if scope == "" || node.Scope == scope {
 			values = append(values, node)
 		}
 	}
@@ -271,46 +429,4 @@ func (egressRepositoryTestStub) UpdateEgressNode(context.Context, domain.Node) (
 }
 func (egressRepositoryTestStub) DeleteEgressNode(context.Context, uint64) error {
 	return errors.New("unsupported")
-}
-
-func TestSelectNodeSpreadsLoadAcrossProxies(t *testing.T) {
-	manager := &Manager{inflight: map[uint64]int{}}
-	nodes := []domain.Node{
-		{ID: 1, Name: "p1", Health: 1},
-		{ID: 2, Name: "p2", Health: 1},
-		{ID: 3, Name: "p3", Health: 1},
-	}
-	// Without load, affinity may prefer a fixed node among equal loads; after pinning load, next picks other nodes.
-	first := manager.selectNode(nodes, "account-1")
-	manager.inflight[first.ID] = 5
-	second := manager.selectNode(nodes, "account-1")
-	if second.ID == first.ID {
-		t.Fatalf("expected least-inflight to avoid overloaded preferred node, first=%d second=%d", first.ID, second.ID)
-	}
-	manager.inflight[second.ID] = 5
-	third := manager.selectNode(nodes, "account-1")
-	if third.ID == first.ID || third.ID == second.ID {
-		t.Fatalf("expected third pick on remaining node, got %d", third.ID)
-	}
-	// 64 concurrent-style: fill with least load should stay balanced within 1.
-	manager.inflight = map[uint64]int{}
-	counts := map[uint64]int{}
-	for i := 0; i < 64; i++ {
-		selected := manager.selectNode(nodes, "worker-"+string(rune('a'+i%26))+string(rune('0'+i%10)))
-		counts[selected.ID]++
-		manager.inflight[selected.ID]++
-	}
-	min, max := 64, 0
-	for _, node := range nodes {
-		n := counts[node.ID]
-		if n < min {
-			min = n
-		}
-		if n > max {
-			max = n
-		}
-	}
-	if max-min > 1 {
-		t.Fatalf("unbalanced distribution %#v", counts)
-	}
 }

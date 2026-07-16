@@ -28,6 +28,8 @@ var (
 const (
 	maxProxyURLBytes         = 8192
 	maxCloudflareCookieBytes = 16 << 10
+	ProxyAccountPlaceholder  = "{account}"
+	proxyAccountSentinel     = "grok2api_account_placeholder"
 )
 
 // RuntimeSource supplies in-memory request/probe stats from the egress manager.
@@ -645,7 +647,15 @@ func NormalizeProxyURL(value string) (string, error) {
 			return value, nil
 		}
 	}
-	parsed, err := url.Parse(value)
+	hasAccountPlaceholder := strings.Contains(value, ProxyAccountPlaceholder)
+	if strings.Count(value, ProxyAccountPlaceholder) > 1 {
+		return "", errors.New("代理地址最多包含一个 {account} 占位符")
+	}
+	if hasAccountPlaceholder && strings.Contains(value, proxyAccountSentinel) {
+		return "", errors.New("代理地址包含保留的账号占位符文本")
+	}
+	parseValue := strings.ReplaceAll(value, ProxyAccountPlaceholder, proxyAccountSentinel)
+	parsed, err := url.Parse(parseValue)
 	if err != nil {
 		return "", errors.New("代理地址格式无效")
 	}
@@ -658,6 +668,12 @@ func NormalizeProxyURL(value string) (string, error) {
 		if parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 			return "", errors.New("代理地址不能包含路径、查询参数或片段")
 		}
+		if hasAccountPlaceholder {
+			if parsed.User == nil || !strings.Contains(parsed.User.Username(), proxyAccountSentinel) {
+				return "", errors.New("{account} 只能用于代理认证用户名")
+			}
+			return strings.ReplaceAll(parsed.String(), proxyAccountSentinel, ProxyAccountPlaceholder), nil
+		}
 		return parsed.String(), nil
 	case "vless", "trojan", "hysteria", "hysteria2", "hy", "hy2", "tuic", "anytls", "ssh", "wireguard", "wg", "shadowtls":
 		if parsed.Hostname() == "" {
@@ -669,7 +685,6 @@ func NormalizeProxyURL(value string) (string, error) {
 		return "", errors.New("代理地址协议必须是 HTTP/SOCKS/SS/VMess/VLESS/Trojan/Hysteria/TUIC/AnyTLS/SSH/WireGuard 或 sing-box outbound JSON")
 	}
 }
-
 func SanitizeCloudflareCookies(value string) string {
 	allowed := make([]string, 0, 4)
 	seen := make(map[string]struct{})

@@ -1,7 +1,7 @@
 import { Navigate, createBrowserRouter } from "react-router-dom";
 
 import { AnonymousBoundary, AuthBoundary } from "@/app/auth-boundary";
-import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredDashboardPage, DeferredFilesPage, DeferredGalleryPage, DeferredModelsPage, DeferredProxiesPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
+import { DeferredAccountsPage, DeferredApiDocsPage, DeferredAppShell, DeferredClientKeysPage, DeferredCreativeConsolePage, DeferredDashboardPage, DeferredFilesPage, DeferredGalleryPage, DeferredModelsPage, DeferredProxiesPage, DeferredRequestAuditsPage, DeferredSettingsPage, DeferredVideoGalleryPage } from "@/app/deferred-pages";
 import { LoginPage } from "@/features/auth/login-page";
 
 export const router = createBrowserRouter([
@@ -20,6 +20,7 @@ export const router = createBrowserRouter([
           { path: "/accounts", element: <DeferredAccountsPage /> },
           { path: "/proxies", element: <DeferredProxiesPage /> },
           { path: "/models", element: <DeferredModelsPage /> },
+          { path: "/creative-console", element: <DeferredCreativeConsolePage /> },
           { path: "/client-keys", element: <DeferredClientKeysPage /> },
           { path: "/files", element: <DeferredFilesPage /> },
           { path: "/gallery", element: <DeferredGalleryPage /> },

@@ -132,6 +132,25 @@ type Response struct {
 	QuotaUnits  int
 	UpstreamURL string
 	Diagnostic  *DiagnosticResponse
+	RateLimit   *RateLimitMetadata
+	// ModelCatalogChanged 表示上游推理响应中的模型目录 ETag 与该账号
+	// 最近一次成功 /models 同步的 ETag 不一致。
+	ModelCatalogChanged bool
+}
+
+const (
+	RateLimitScopeRPS = "rps"
+	RateLimitScopeRPM = "rpm"
+)
+
+// RateLimitMetadata 表示上游返回的可安全传播的瞬时限流元数据。
+type RateLimitMetadata struct {
+	Scope      string
+	TeamID     string
+	Model      string
+	Actual     int
+	Limit      int
+	RetryAfter time.Duration
 }
 
 const MaxDiagnosticBodyBytes = 64 << 10
@@ -169,18 +188,19 @@ type DeviceAuthorization struct {
 
 // CredentialSeed 表示登录或导入后尚未持久化的 OAuth 凭据。
 type CredentialSeed struct {
-	Provider     account.Provider
-	AuthType     account.AuthType
-	WebTier      account.WebTier
-	Name         string
-	Email        string
-	UserID       string
-	TeamID       string
-	SourceKey    string
-	OIDCClientID string
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    time.Time
+	Provider          account.Provider
+	AuthType          account.AuthType
+	WebTier           account.WebTier
+	Name              string
+	Email             string
+	UserID            string
+	TeamID            string
+	SourceKey         string
+	OIDCClientID      string
+	AccessToken       string
+	RefreshToken      string
+	CloudflareCookies string
+	ExpiresAt         time.Time
 }
 
 type QuotaSnapshot struct {

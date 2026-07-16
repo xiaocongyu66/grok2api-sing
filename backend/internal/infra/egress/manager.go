@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	application "github.com/chenyme/grok2api/backend/internal/application/egress"
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -21,6 +23,7 @@ import (
 
 const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 const nodeSnapshotTTL = time.Second
+const stickyProxyRetryLimit = 2
 
 type Lease struct {
 	NodeID    uint64
@@ -31,6 +34,7 @@ type Lease struct {
 	CFCookies string
 	client    requestClient
 	browser   *browserClient
+	sticky    bool
 	release   func()
 }
 
@@ -43,13 +47,23 @@ func (l *Lease) Do(request *http.Request) (*http.Response, error) {
 	if l == nil || l.client == nil {
 		return nil, errors.New("出口客户端未初始化")
 	}
-	return l.client.Do(request)
+	return l.do(request)
 }
 func (l *Lease) Release() {
 	if l != nil && l.release != nil {
 		l.release()
 		l.release = nil
 	}
+}
+
+// defaultProbeURL targets xAI Build edge so one-click tests exercise the same path
+// clients use for inference (not a third-party IP echo).
+const defaultProbeURL = "https://cli-chat-proxy.grok.com/"
+
+// fallbackProbeURLs are tried when the primary returns transport errors.
+var fallbackProbeURLs = []string{
+	"https://api.x.ai/",
+	"https://www.gstatic.com/generate_204",
 }
 
 type nodeRuntimeStats struct {
@@ -66,18 +80,23 @@ type Manager struct {
 	repository repository.EgressRepository
 	cipher     *security.Cipher
 	mu         sync.Mutex
-	clients    map[uint64]cachedClient
+	clients    map[clientCacheKey]cachedClient
 	inflight   map[uint64]int
-	stats      map[uint64]*nodeRuntimeStats
 	nodes      map[domain.Scope]cachedNodeSnapshot
 	nodeLoads  singleflight.Group
+	stats      map[uint64]*nodeRuntimeStats
 	probeURL   string
 }
 
 type cachedClient struct {
+	client  requestClient
+	browser *browserClient
+}
+
+type clientCacheKey struct {
+	nodeID      uint64
+	scope       domain.Scope
 	fingerprint string
-	client      requestClient
-	browser     *browserClient
 }
 
 type cachedNodeSnapshot struct {
@@ -85,21 +104,11 @@ type cachedNodeSnapshot struct {
 	expiresAt time.Time
 }
 
-// defaultProbeURL targets xAI Build edge so one-click tests exercise the same path
-// real Grok Build traffic uses (not a generic Google 204 that some proxies block).
-const defaultProbeURL = "https://cli-chat-proxy.grok.com/"
-
-// fallbackProbeURLs are tried when the primary returns transport errors.
-var fallbackProbeURLs = []string{
-	"https://grok.com/",
-	"https://console.x.ai/",
-}
-
 func NewManager(repository repository.EgressRepository, cipher *security.Cipher) *Manager {
 	return &Manager{
 		repository: repository,
 		cipher:     cipher,
-		clients:    make(map[uint64]cachedClient),
+		clients:    make(map[clientCacheKey]cachedClient),
 		inflight:   make(map[uint64]int),
 		stats:      make(map[uint64]*nodeRuntimeStats),
 		nodes:      make(map[domain.Scope]cachedNodeSnapshot),
@@ -107,7 +116,386 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 	}
 }
 
-// RuntimeStats returns in-memory success/failure counters and last probe info for a node.
+func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
+	lease, _, err := m.acquire(ctx, scope, affinity, true, "")
+	return lease, err
+}
+
+// AcquireCredential binds the outbound proxy identity to one persisted
+// Provider credential. Resin templates use this identity as their Account.
+func (m *Manager) AcquireCredential(ctx context.Context, scope domain.Scope, credential accountdomain.Credential) (*Lease, error) {
+	ctx = WithAccount(ctx, string(credential.Provider), credential.ID)
+	credentialCookies := ""
+	if scope != domain.ScopeBuild && strings.TrimSpace(credential.EncryptedCloudflareCookie) != "" {
+		cookies, decryptErr := m.cipher.Decrypt(credential.EncryptedCloudflareCookie)
+		if decryptErr != nil {
+			return nil, decryptErr
+		}
+		credentialCookies = application.SanitizeCloudflareCookies(cookies)
+	}
+	lease, _, err := m.acquire(ctx, scope, strconv.FormatUint(credential.ID, 10), true, credentialCookies)
+	return lease, err
+}
+
+func (m *Manager) AcquireIfConfigured(ctx context.Context, scope domain.Scope, affinity string) (*Lease, bool, error) {
+	return m.acquire(ctx, scope, affinity, false, "")
+}
+
+func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, credentialCookies string) (*Lease, bool, error) {
+	now := time.Now().UTC()
+	configured := false
+	var available []domain.Node
+	for _, candidateScope := range fallbackScopes(scope) {
+		nodes, err := m.listNodes(ctx, candidateScope, now)
+		if err != nil {
+			return nil, false, err
+		}
+		configured = configured || len(nodes) > 0
+		candidateAvailable := make([]domain.Node, 0, len(nodes))
+		for _, node := range nodes {
+			if node.Enabled && (node.CooldownUntil == nil || !now.Before(*node.CooldownUntil)) {
+				candidateAvailable = append(candidateAvailable, node)
+			}
+		}
+		if len(candidateAvailable) > 0 {
+			available = candidateAvailable
+			break
+		}
+	}
+	if len(available) == 0 {
+		if configured {
+			return nil, false, fmt.Errorf("当前没有可用的 %s 出口节点", scope)
+		}
+		if !allowDirect {
+			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
+			return nil, false, nil
+		}
+		available = []domain.Node{{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}}
+	}
+	sort.SliceStable(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+	selected := m.selectNode(available, affinity)
+	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
+	if err != nil {
+		return nil, false, err
+	}
+	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	if err != nil {
+		return nil, false, err
+	}
+	sticky := strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+	if sticky {
+		accountKey := accountFromContext(ctx)
+		if accountKey == "" && strings.TrimSpace(affinity) != "" {
+			accountKey = string(scope) + "_" + strings.TrimSpace(affinity)
+		}
+		proxyURL, err = renderAccountProxyURL(proxyURL, accountKey)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	cookies := ""
+	if scope != domain.ScopeBuild {
+		cookies, err = m.cipher.Decrypt(selected.EncryptedCloudflareCookie)
+		if err != nil {
+			return nil, false, err
+		}
+		cookies = application.SanitizeCloudflareCookies(cookies)
+		if credentialCookies != "" {
+			cookies = credentialCookies
+		}
+	}
+	userAgent := ""
+	if scope != domain.ScopeBuild {
+		userAgent = strings.TrimSpace(selected.UserAgent)
+	}
+	if scope != domain.ScopeBuild && userAgent == "" {
+		userAgent = DefaultUserAgent
+	}
+	client, err := m.clientFor(selected.ID, scope, proxyURL, userAgent, cookies, sticky)
+	if err != nil {
+		return nil, false, err
+	}
+	m.mu.Lock()
+	m.inflight[selected.ID]++
+	m.mu.Unlock()
+	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != ""})
+	var once sync.Once
+	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky, release: func() {
+		once.Do(func() {
+			m.mu.Lock()
+			m.inflight[selected.ID]--
+			if m.inflight[selected.ID] <= 0 {
+				delete(m.inflight, selected.ID)
+			}
+			m.mu.Unlock()
+		})
+	}}, true, nil
+}
+
+func renderAccountProxyURL(template, accountKey string) (string, error) {
+	if !strings.Contains(template, application.ProxyAccountPlaceholder) {
+		return template, nil
+	}
+	accountKey = normalizeProxyAccount(accountKey)
+	if accountKey == "" {
+		return "", errors.New("粘性代理需要有效的账号身份")
+	}
+	return strings.ReplaceAll(template, application.ProxyAccountPlaceholder, accountKey), nil
+}
+
+func normalizeProxyAccount(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.Map(func(character rune) rune {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-' {
+			return character
+		}
+		return '_'
+	}, value)
+	if len(value) <= 128 {
+		return value
+	}
+	digest := sha256.Sum256([]byte(value))
+	return value[:95] + "_" + fmt.Sprintf("%x", digest[:16])
+}
+
+func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Time) ([]domain.Node, error) {
+	m.mu.Lock()
+	if snapshot, ok := m.nodes[scope]; ok && now.Before(snapshot.expiresAt) {
+		values := append([]domain.Node(nil), snapshot.values...)
+		m.mu.Unlock()
+		return values, nil
+	}
+	m.mu.Unlock()
+	loaded, err, _ := m.nodeLoads.Do(string(scope), func() (any, error) {
+		checkTime := time.Now().UTC()
+		m.mu.Lock()
+		if snapshot, ok := m.nodes[scope]; ok && checkTime.Before(snapshot.expiresAt) {
+			values := append([]domain.Node(nil), snapshot.values...)
+			m.mu.Unlock()
+			return values, nil
+		}
+		m.mu.Unlock()
+		values, err := m.repository.ListEgressNodes(ctx, scope, repository.SortQuery{})
+		if err != nil {
+			return nil, err
+		}
+		m.mu.Lock()
+		m.nodes[scope] = cachedNodeSnapshot{values: append([]domain.Node(nil), values...), expiresAt: checkTime.Add(nodeSnapshotTTL)}
+		m.mu.Unlock()
+		return values, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return append([]domain.Node(nil), loaded.([]domain.Node)...), nil
+}
+
+func (m *Manager) invalidateNodes(scope domain.Scope) {
+	m.mu.Lock()
+	delete(m.nodes, scope)
+	m.mu.Unlock()
+}
+
+func fallbackScopes(scope domain.Scope) []domain.Scope {
+	if scope == domain.ScopeWebAsset {
+		return []domain.Scope{domain.ScopeWebAsset, domain.ScopeWeb}
+	}
+	return []domain.Scope{scope}
+}
+
+func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
+	if affinity != "" {
+		digest := sha256.Sum256([]byte(affinity))
+		selected := nodes[int(binary.BigEndian.Uint64(digest[:8])%uint64(len(nodes)))]
+		if selected.Health >= 0.8 || len(nodes) == 1 {
+			return selected
+		}
+		for _, node := range nodes {
+			if node.Health > selected.Health {
+				selected = node
+			}
+		}
+		return selected
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	best := nodes[0]
+	for _, node := range nodes[1:] {
+		if m.inflight[node.ID] < m.inflight[best.ID] || (m.inflight[node.ID] == m.inflight[best.ID] && node.Health > best.Health) {
+			best = node
+		}
+	}
+	return best
+}
+
+func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool) (cachedClient, error) {
+	clientKind := "browser"
+	if scope == domain.ScopeBuild {
+		clientKind = "build"
+	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent+"\x00"+cookies)))
+	cacheScope := scope
+	if cacheScope == domain.ScopeWebAsset {
+		cacheScope = domain.ScopeWeb
+	}
+	key := clientCacheKey{nodeID: id, scope: cacheScope, fingerprint: fingerprint}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cached, ok := m.clients[key]; ok {
+		return cached, nil
+	}
+	var value cachedClient
+	if scope == domain.ScopeBuild {
+		client, err := newBuildClient(proxyURL)
+		if err != nil {
+			return cachedClient{}, err
+		}
+		value.client = client
+	} else {
+		client, err := newBrowserClient(proxyURL)
+		if err != nil {
+			return cachedClient{}, err
+		}
+		value.client = client
+		value.browser = client
+	}
+	// 固定代理同节点出现新指纹说明配置已更新，旧连接池应淘汰。
+	// 账号模板代理的指纹会随 Resin Account 变化，必须并存才能维持各账号的粘性连接池。
+	// 直连节点统一使用 ID 0，不同 Provider 的传输必须并存，避免 Build 与 Web 互相重建客户端。
+	if id != 0 && !sticky {
+		for previousKey, previous := range m.clients {
+			if previousKey.nodeID != id {
+				continue
+			}
+			if previous.client != nil {
+				previous.client.CloseIdleConnections()
+			}
+			delete(m.clients, previousKey)
+		}
+	}
+	m.clients[key] = value
+	return value, nil
+}
+
+func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, transportErr error) {
+	m.FeedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr)
+}
+
+func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
+	if nodeID == 0 {
+		if transportErr != nil || status >= 500 || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
+			m.mu.Lock()
+			m.invalidateClientForScopeLocked(0, scope)
+			m.mu.Unlock()
+		}
+		return
+	}
+	value, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	switch {
+	case transportErr == nil && status >= 200 && status < 400:
+		value.Health = min(1, value.Health+0.1)
+		value.FailureCount = 0
+		value.CooldownUntil = nil
+		value.LastError = ""
+	case status == http.StatusUnauthorized || status == http.StatusTooManyRequests:
+		return
+	case scope == domain.ScopeBuild && status == http.StatusForbidden:
+		// Build 403 可能是账号权限、额度、Token 或出口策略，响应体由网关层
+		// 分类；仅凭状态码不能把标准 CLI 出口误判为 Web anti-bot。
+		return
+	case status == http.StatusForbidden:
+		if m.isStickyProxyNode(value) {
+			// A 403 on an account-bound Resin lease usually means that account's
+			// clearance is stale. Do not cool or invalidate the shared node for
+			// unrelated accounts.
+			return
+		}
+		value.FailureCount++
+		value.Health = max(0.05, value.Health*0.7)
+		value.CooldownUntil = nil
+		value.LastError = "anti-bot rejection"
+		m.mu.Lock()
+		m.invalidateClientLocked(nodeID)
+		m.mu.Unlock()
+	default:
+		value.FailureCount++
+		value.Health = max(0.05, value.Health*0.7)
+		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))
+		until := now.Add(cooldown)
+		value.CooldownUntil = &until
+		if transportErr != nil {
+			value.LastError = "transport error"
+		} else {
+			value.LastError = fmt.Sprintf("upstream status %d", status)
+		}
+		m.mu.Lock()
+		m.invalidateClientLocked(nodeID)
+		m.mu.Unlock()
+	}
+	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
+		m.invalidateNodes(value.Scope)
+	}
+}
+
+func (m *Manager) isStickyProxyNode(value domain.Node) bool {
+	if m == nil || m.cipher == nil || strings.TrimSpace(value.EncryptedProxyURL) == "" {
+		return false
+	}
+	proxyURL, err := m.cipher.Decrypt(value.EncryptedProxyURL)
+	return err == nil && strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+}
+
+func (m *Manager) invalidateClientLocked(nodeID uint64) {
+	for key, cached := range m.clients {
+		if key.nodeID != nodeID {
+			continue
+		}
+		if cached.client != nil {
+			cached.client.CloseIdleConnections()
+		}
+		delete(m.clients, key)
+	}
+}
+
+func (m *Manager) invalidateClientForScopeLocked(nodeID uint64, scope domain.Scope) {
+	if scope == domain.ScopeWebAsset {
+		scope = domain.ScopeWeb
+	}
+	for key, cached := range m.clients {
+		if key.nodeID != nodeID || key.scope != scope {
+			continue
+		}
+		if cached.client != nil {
+			cached.client.CloseIdleConnections()
+		}
+		delete(m.clients, key)
+	}
+}
+
+func BuildSSOCookie(token, cloudflareCookies string) string {
+	token = strings.TrimSpace(token)
+	if strings.HasPrefix(strings.ToLower(token), "sso=") {
+		token = strings.TrimSpace(token[len("sso="):])
+	}
+	if value, _, found := strings.Cut(token, ";"); found {
+		token = strings.TrimSpace(value)
+	}
+	token = strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(token)
+	cookies := "sso=" + token + "; sso-rw=" + token
+	if sanitized := application.SanitizeCloudflareCookies(cloudflareCookies); sanitized != "" {
+		cookies += "; " + sanitized
+	}
+	return cookies
+}
+
 func (m *Manager) RuntimeStats(nodeID uint64) (success, failure int64, inflight int, lastProbeAt *time.Time, lastOK *bool, lastMs int64, lastErr string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -168,279 +556,6 @@ func (m *Manager) recordProbe(nodeID uint64, ok bool, latencyMs int64, errMsg st
 	}
 }
 
-func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
-	lease, _, err := m.acquire(ctx, scope, affinity, true)
-	return lease, err
-}
-
-func (m *Manager) AcquireIfConfigured(ctx context.Context, scope domain.Scope, affinity string) (*Lease, bool, error) {
-	return m.acquire(ctx, scope, affinity, false)
-}
-
-func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool) (*Lease, bool, error) {
-	now := time.Now().UTC()
-	configured := false
-	var available []domain.Node
-	for _, candidateScope := range fallbackScopes(scope) {
-		nodes, err := m.listNodes(ctx, candidateScope, now)
-		if err != nil {
-			return nil, false, err
-		}
-		configured = configured || len(nodes) > 0
-		candidateAvailable := make([]domain.Node, 0, len(nodes))
-		for _, node := range nodes {
-			if node.Enabled && (node.CooldownUntil == nil || !now.Before(*node.CooldownUntil)) {
-				candidateAvailable = append(candidateAvailable, node)
-			}
-		}
-		if len(candidateAvailable) > 0 {
-			available = candidateAvailable
-			break
-		}
-	}
-	if len(available) == 0 {
-		if configured {
-			return nil, false, fmt.Errorf("当前没有可用的 %s 出口节点", scope)
-		}
-		if !allowDirect {
-			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
-			return nil, false, nil
-		}
-		available = []domain.Node{{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}}
-	}
-	sort.SliceStable(available, func(i, j int) bool { return available[i].ID < available[j].ID })
-	selected := m.selectNode(available, affinity)
-	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
-	if err != nil {
-		return nil, false, err
-	}
-	proxyURL, err = application.NormalizeProxyURL(proxyURL)
-	if err != nil {
-		return nil, false, err
-	}
-	cookies := ""
-	if scope != domain.ScopeBuild {
-		cookies, err = m.cipher.Decrypt(selected.EncryptedCloudflareCookie)
-		if err != nil {
-			return nil, false, err
-		}
-		cookies = application.SanitizeCloudflareCookies(cookies)
-	}
-	userAgent := ""
-	if scope != domain.ScopeBuild {
-		// Fixed UA, empty→default, or "random"→pick from pool for this lease.
-		userAgent = ResolveBrowserUserAgent(selected.UserAgent)
-	}
-	client, err := m.clientFor(selected.ID, scope, proxyURL, userAgent, cookies)
-	if err != nil {
-		return nil, false, err
-	}
-	m.mu.Lock()
-	m.inflight[selected.ID]++
-	m.mu.Unlock()
-	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != ""})
-	var once sync.Once
-	return &Lease{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL, UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, release: func() {
-		once.Do(func() {
-			m.mu.Lock()
-			m.inflight[selected.ID]--
-			if m.inflight[selected.ID] <= 0 {
-				delete(m.inflight, selected.ID)
-			}
-			m.mu.Unlock()
-		})
-	}}, true, nil
-}
-
-func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Time) ([]domain.Node, error) {
-	m.mu.Lock()
-	if snapshot, ok := m.nodes[scope]; ok && now.Before(snapshot.expiresAt) {
-		values := append([]domain.Node(nil), snapshot.values...)
-		m.mu.Unlock()
-		return values, nil
-	}
-	m.mu.Unlock()
-	loaded, err, _ := m.nodeLoads.Do(string(scope), func() (any, error) {
-		checkTime := time.Now().UTC()
-		m.mu.Lock()
-		if snapshot, ok := m.nodes[scope]; ok && checkTime.Before(snapshot.expiresAt) {
-			values := append([]domain.Node(nil), snapshot.values...)
-			m.mu.Unlock()
-			return values, nil
-		}
-		m.mu.Unlock()
-		values, err := m.repository.ListEgressNodes(ctx, scope, repository.SortQuery{})
-		if err != nil {
-			return nil, err
-		}
-		m.mu.Lock()
-		m.nodes[scope] = cachedNodeSnapshot{values: append([]domain.Node(nil), values...), expiresAt: checkTime.Add(nodeSnapshotTTL)}
-		m.mu.Unlock()
-		return values, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return append([]domain.Node(nil), loaded.([]domain.Node)...), nil
-}
-
-func (m *Manager) invalidateNodes(scope domain.Scope) {
-	m.mu.Lock()
-	delete(m.nodes, scope)
-	m.mu.Unlock()
-}
-
-func fallbackScopes(scope domain.Scope) []domain.Scope {
-	if scope == domain.ScopeWebAsset {
-		return []domain.Scope{domain.ScopeWebAsset, domain.ScopeWeb}
-	}
-	return []domain.Scope{scope}
-}
-
-// selectNode spreads concurrent leases across proxies by least in-flight load.
-// Affinity is only a soft preference among equally loaded nodes so that e.g.
-// 64 concurrent requests with 6 proxies land ~10-11 each instead of pinning all
-// traffic to a single hashed node.
-func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
-	if len(nodes) == 1 {
-		return nodes[0]
-	}
-	preferredID := uint64(0)
-	if affinity != "" {
-		digest := sha256.Sum256([]byte(affinity))
-		preferredID = nodes[int(binary.BigEndian.Uint64(digest[:8])%uint64(len(nodes)))].ID
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	best := nodes[0]
-	bestLoad := m.inflight[best.ID]
-	for _, node := range nodes[1:] {
-		load := m.inflight[node.ID]
-		switch {
-		case load < bestLoad:
-			best, bestLoad = node, load
-		case load > bestLoad:
-			continue
-		case preferredID != 0 && node.ID == preferredID:
-			best = node
-		case preferredID != 0 && best.ID == preferredID:
-			continue
-		case node.Health > best.Health || (node.Health == best.Health && node.ID < best.ID):
-			best = node
-		}
-	}
-	return best
-}
-
-func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string) (cachedClient, error) {
-	clientKind := "browser"
-	if scope == domain.ScopeBuild {
-		clientKind = "build"
-	}
-	// Browser UA is applied per-request by callers from Lease.UserAgent; exclude it
-	// from the TLS client fingerprint so random-UA mode does not thrash the cache.
-	fingerprintMaterial := clientKind + "\x00" + proxyURL + "\x00" + cookies
-	if scope == domain.ScopeBuild {
-		fingerprintMaterial = clientKind + "\x00" + proxyURL + "\x00" + userAgent + "\x00" + cookies
-	}
-	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(fingerprintMaterial)))
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if cached, ok := m.clients[id]; ok && cached.fingerprint == fingerprint {
-		return cached, nil
-	}
-	var value cachedClient
-	value.fingerprint = fingerprint
-	if scope == domain.ScopeBuild {
-		client, err := newBuildClient(proxyURL)
-		if err != nil {
-			return cachedClient{}, err
-		}
-		value.client = client
-	} else {
-		client, err := newBrowserClient(proxyURL)
-		if err != nil {
-			return cachedClient{}, err
-		}
-		value.client = client
-		value.browser = client
-	}
-	if previous, exists := m.clients[id]; exists && previous.client != nil {
-		previous.client.CloseIdleConnections()
-	}
-	m.clients[id] = value
-	return value, nil
-}
-
-func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, transportErr error) {
-	m.FeedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr)
-}
-
-func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
-	if nodeID == 0 {
-		if transportErr != nil || status >= 500 || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
-			m.mu.Lock()
-			m.invalidateClientLocked(0)
-			m.mu.Unlock()
-		}
-		return
-	}
-	value, err := m.repository.GetEgressNode(ctx, nodeID)
-	if err != nil {
-		return
-	}
-	now := time.Now().UTC()
-	switch {
-	case transportErr == nil && status >= 200 && status < 400:
-		m.recordRequest(nodeID, true)
-		value.Health = min(1, value.Health+0.1)
-		value.FailureCount = 0
-		value.CooldownUntil = nil
-		value.LastError = ""
-	case status == http.StatusUnauthorized || status == http.StatusTooManyRequests:
-		// Account-level errors: do not punish the proxy node stats.
-		return
-	case scope == domain.ScopeBuild && status == http.StatusForbidden:
-		// Build 403 可能是账号权限、额度、Token 或出口策略，响应体由网关层
-		// 分类；仅凭状态码不能把标准 CLI 出口误判为 Web anti-bot。
-		return
-	case status == http.StatusForbidden:
-		m.recordRequest(nodeID, false)
-		value.FailureCount++
-		value.Health = max(0.05, value.Health*0.7)
-		value.CooldownUntil = nil
-		value.LastError = "疑似反爬拒绝（403）"
-		m.mu.Lock()
-		m.invalidateClientLocked(nodeID)
-		m.mu.Unlock()
-	default:
-		m.recordRequest(nodeID, false)
-		value.FailureCount++
-		value.Health = max(0.05, value.Health*0.7)
-		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))
-		until := now.Add(cooldown)
-		value.CooldownUntil = &until
-		if transportErr != nil {
-			value.LastError = "传输/连通失败"
-		} else {
-			value.LastError = fmt.Sprintf("上游状态码 %d", status)
-		}
-		m.mu.Lock()
-		m.invalidateClientLocked(nodeID)
-		m.mu.Unlock()
-	}
-	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
-		for _, scope := range value.EffectiveScopes() {
-			m.invalidateNodes(scope)
-		}
-		if len(value.EffectiveScopes()) == 0 {
-			m.invalidateNodes(value.Scope)
-		}
-	}
-}
-
-// ProbeNode dials through the node's configured proxy and hits a lightweight
-// connectivity URL. It records latency into in-memory stats for the admin report.
 func (m *Manager) ProbeNode(ctx context.Context, nodeID uint64) (domain.ProbeResult, error) {
 	value, err := m.repository.GetEgressNode(ctx, nodeID)
 	if err != nil {
@@ -450,6 +565,7 @@ func (m *Manager) ProbeNode(ctx context.Context, nodeID uint64) (domain.ProbeRes
 }
 
 // ProbeAll tests every configured node (optionally filtered by scope).
+
 func (m *Manager) ProbeAll(ctx context.Context, scope domain.Scope) ([]domain.ProbeResult, error) {
 	values, err := m.repository.ListEgressNodes(ctx, scope, repository.SortQuery{})
 	if err != nil {
@@ -553,25 +669,3 @@ func (m *Manager) probeNode(ctx context.Context, value domain.Node) (domain.Prob
 	return result, nil
 }
 
-func (m *Manager) invalidateClientLocked(nodeID uint64) {
-	if cached, exists := m.clients[nodeID]; exists && cached.client != nil {
-		cached.client.CloseIdleConnections()
-	}
-	delete(m.clients, nodeID)
-}
-
-func BuildSSOCookie(token, cloudflareCookies string) string {
-	token = strings.TrimSpace(token)
-	if strings.HasPrefix(strings.ToLower(token), "sso=") {
-		token = strings.TrimSpace(token[len("sso="):])
-	}
-	if value, _, found := strings.Cut(token, ";"); found {
-		token = strings.TrimSpace(value)
-	}
-	token = strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(token)
-	cookies := "sso=" + token + "; sso-rw=" + token
-	if sanitized := application.SanitizeCloudflareCookies(cloudflareCookies); sanitized != "" {
-		cookies += "; " + sanitized
-	}
-	return cookies
-}
