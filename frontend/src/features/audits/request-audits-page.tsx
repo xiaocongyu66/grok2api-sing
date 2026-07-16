@@ -282,6 +282,7 @@ function formatClientKeyLabel(name: string | undefined, id: string): string {
   return id ? `#${id}` : "-";
 }
 
+/** Product names stay English (brand identifiers). Locale-only labels use audits.clients.* */
 const CLIENT_LABELS: Record<string, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
@@ -302,20 +303,23 @@ const CLIENT_LABELS: Record<string, string> = {
   anthropic_sdk: "Anthropic SDK",
   node: "Node / undici",
   python: "Python HTTP",
-  go: "Go 客户端",
   java: "Java / OkHttp",
   rust: "Rust HTTP",
   ruby: "Ruby HTTP",
   perl: "Perl",
   curl: "curl",
   wget: "Wget",
-  legacy: "历史请求",
-  unknown: "未知客户端",
 };
 
 function ClientTypeValue({ type, userAgent, ip }: { type?: string; userAgent?: string; ip?: string }) {
+  const { t } = useTranslation();
   const id = (type ?? "").trim() || "legacy";
-  const label = CLIENT_LABELS[id] ?? id;
+  const localized =
+    id === "go" ? t("audits.clients.go")
+      : id === "legacy" ? t("audits.clients.legacy")
+        : id === "unknown" ? t("audits.clients.unknown")
+          : null;
+  const label = localized ?? CLIENT_LABELS[id] ?? id;
   // Always surface UA in tooltip so operators can diagnose "未知/Go" without guessing.
   const title = [
     userAgent ? `UA: ${userAgent}` : "UA: (empty)",
@@ -324,7 +328,7 @@ function ClientTypeValue({ type, userAgent, ip }: { type?: string; userAgent?: s
   ].filter(Boolean).join("\n");
   const uaHint = userAgent
     ? (userAgent.length > 48 ? `${userAgent.slice(0, 48)}…` : userAgent)
-    : (id === "unknown" ? "(无 User-Agent)" : null);
+    : (id === "unknown" ? t("audits.clients.emptyUserAgent") : null);
   return (
     <div className="min-w-0 max-w-[11rem]" title={title}>
       <span className="block truncate text-xs font-medium">{label}</span>

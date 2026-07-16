@@ -191,8 +191,8 @@ export function AppShell() {
           <DropdownMenuSub>
             <DropdownMenuSubTrigger className="h-8"><Languages />{t("shell.language")}</DropdownMenuSubTrigger>
             <DropdownMenuSubContent>
-              <DropdownMenuItem onClick={() => void i18n.changeLanguage("zh-CN")}>简体中文</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => void i18n.changeLanguage("en")}>English</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void i18n.changeLanguage("zh-CN")}>{t("shell.languageZh")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void i18n.changeLanguage("en")}>{t("shell.languageEn")}</DropdownMenuItem>
             </DropdownMenuSubContent>
           </DropdownMenuSub>
           <DropdownMenuItem className="h-8" onClick={() => setPasswordOpen(true)}><KeyRound />{t("auth.changePassword")}</DropdownMenuItem>

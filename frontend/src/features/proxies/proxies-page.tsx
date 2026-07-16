@@ -57,7 +57,7 @@ type BatchImportForm = {
 };
 
 const emptyBatch: BatchImportForm = {
-  namePrefix: "代理",
+  namePrefix: "",
   scopes: ["grok_build"],
   enabled: true,
   proxyText: "",
