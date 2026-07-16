@@ -176,8 +176,8 @@ func (r *DashboardRepository) Snapshot(ctx context.Context, bucketBoundaries []t
 			}
 		}
 
-		// Downstream client breakdown (Claude Code / Codex / Hermes / …).
-		clientExpression := "CASE WHEN TRIM(client_type) = '' OR client_type IS NULL THEN 'unknown' ELSE client_type END"
+		// Downstream client breakdown. Empty client_type = pre-detection audits (legacy), not "unknown".
+		clientExpression := "CASE WHEN TRIM(client_type) = '' OR client_type IS NULL THEN 'legacy' ELSE client_type END"
 		var clients []struct {
 			Client string
 			Count  int64

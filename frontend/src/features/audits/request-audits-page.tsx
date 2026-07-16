@@ -286,15 +286,22 @@ const CLIENT_LABELS: Record<string, string> = {
   cursor: "Cursor",
   continue: "Continue",
   aider: "Aider",
+  roo_code: "Roo Code",
+  windsurf: "Windsurf",
   openai_sdk: "OpenAI SDK",
   anthropic_sdk: "Anthropic SDK",
+  node: "Node",
   python: "Python",
+  go: "Go",
+  java: "Java",
+  rust: "Rust",
   curl: "curl",
+  legacy: "历史请求",
   unknown: "Unknown",
 };
 
 function ClientTypeValue({ type, userAgent, ip }: { type?: string; userAgent?: string; ip?: string }) {
-  const id = (type ?? "").trim() || "unknown";
+  const id = (type ?? "").trim() || "legacy";
   const label = CLIENT_LABELS[id] ?? id;
   const title = [userAgent, ip].filter(Boolean).join(" · ") || id;
   return (

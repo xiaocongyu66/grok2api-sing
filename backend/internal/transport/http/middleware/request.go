@@ -101,6 +101,8 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		for _, name := range []string{
 			"x-claude-code-session-id", "x-codex-window-id", "x-codex-session-id",
 			"x-grok-conv-id", "x-grok-conversation-id",
+			"originator", "x-app", "anthropic-version", "anthropic-beta",
+			"x-stainless-lang", "x-stainless-package-version",
 		} {
 			if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
 				headers[strings.ToLower(name)] = value

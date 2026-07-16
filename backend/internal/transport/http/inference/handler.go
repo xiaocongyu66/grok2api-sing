@@ -288,6 +288,10 @@ func detectClient(c *gin.Context) (clientType, userAgent, clientIP string) {
 	for _, name := range []string{
 		"x-claude-code-session-id", "x-codex-window-id", "x-codex-session-id",
 		"x-grok-conv-id", "x-grok-conversation-id",
+		"originator", "x-app", "x-client-name", "x-client-title",
+		"anthropic-version", "anthropic-beta",
+		"openai-beta", "openai-organization",
+		"x-stainless-lang", "x-stainless-package-version", "x-stainless-runtime",
 	} {
 		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
 			headers[strings.ToLower(name)] = value
