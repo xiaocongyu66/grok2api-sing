@@ -73,3 +73,21 @@ func TestDetectLanguageRuntimes(t *testing.T) {
 		t.Fatalf("axios = %s", got)
 	}
 }
+
+func TestDetectProductHeadersAndGo(t *testing.T) {
+	if got := Detect("", map[string]string{"x-client-name": "sharkey"}); got != OpenAISDK {
+		t.Fatalf("x-client-name sharkey = %s", got)
+	}
+	if got := Detect("", map[string]string{"x-client-name": "grok-cli"}); got != GrokCLI {
+		t.Fatalf("x-client-name grok = %s", got)
+	}
+	if got := Detect("Go-http-client/2.0", nil); got != GoHTTP {
+		t.Fatalf("go ua = %s", got)
+	}
+	if got := Detect("Misskey/2025.5.2", nil); got != OpenAISDK {
+		t.Fatalf("misskey = %s", got)
+	}
+	if got := Detect("SomeBot/1.0", nil); got != Unknown {
+		t.Fatalf("unknown = %s", got)
+	}
+}

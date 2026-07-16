@@ -50,12 +50,12 @@ var Labels = map[string]string{
 	Anthropic:  "Anthropic SDK",
 	NodeHTTP:   "Node",
 	PythonHTTP: "Python",
-	GoHTTP:     "Go",
+	GoHTTP:     "Go 客户端",
 	JavaHTTP:   "Java",
 	RustHTTP:   "Rust",
 	Curl:       "curl",
 	Legacy:     "历史请求",
-	Unknown:    "Unknown",
+	Unknown:    "未知客户端",
 }
 
 // Detect classifies a caller from User-Agent and optional request headers.
@@ -68,6 +68,9 @@ func Detect(userAgent string, headers map[string]string) string {
 	}
 	originator := strings.ToLower(strings.TrimSpace(headerValue(headers, "originator")))
 	xApp := strings.ToLower(strings.TrimSpace(headerValue(headers, "x-app")))
+	xClientName := strings.ToLower(strings.TrimSpace(headerValue(headers, "x-client-name")))
+	xClientTitle := strings.ToLower(strings.TrimSpace(headerValue(headers, "x-client-title")))
+	xTitle := strings.ToLower(strings.TrimSpace(headerValue(headers, "x-title")))
 	stainlessPkg := strings.ToLower(strings.TrimSpace(headerValue(headers, "x-stainless-package-version")))
 	_ = stainlessPkg
 
@@ -83,9 +86,23 @@ func Detect(userAgent string, headers map[string]string) string {
 		return Codex
 	}
 	if hasHeader(headers, "x-grok-conv-id") || hasHeader(headers, "x-grok-conversation-id") {
-		if matchAny(ua, "grok-cli", "grok cli", "xai-grok", "grok-shell", "xai-sdk") || ua == "" || matchAny(originator, "grok") {
+		if matchAny(ua, "grok-cli", "grok cli", "xai-grok", "grok-shell", "xai-sdk", "grok-pager", "grok-build") || ua == "" || matchAny(originator, "grok") {
 			return GrokCLI
 		}
+	}
+
+	// Explicit client identity headers (downstream apps should set one of these).
+	if id := detectFromProductToken(xClientName); id != Unknown {
+		return id
+	}
+	if id := detectFromProductToken(xClientTitle); id != Unknown {
+		return id
+	}
+	if id := detectFromProductToken(xTitle); id != Unknown {
+		return id
+	}
+	if id := detectFromProductToken(xApp); id != Unknown {
+		return id
 	}
 
 	// User-Agent / originator product tokens (multi-agent and IDE clients first).
@@ -99,7 +116,7 @@ func Detect(userAgent string, headers map[string]string) string {
 		return Hermes
 	case matchAny(ua, "opencode", "open-code", "sst/opencode", "anomalyco/opencode"):
 		return OpenCode
-	case matchAny(ua, "grok-cli", "grok cli", "xai-grok", "grok-shell", "xai-sdk", "xai/"):
+	case matchAny(ua, "grok-cli", "grok cli", "xai-grok", "grok-shell", "xai-sdk", "xai/", "grok-pager", "grok-build"):
 		return GrokCLI
 	case matchAny(ua, "cline", "claude-dev", "roo-cline"):
 		return Cline
@@ -116,18 +133,8 @@ func Detect(userAgent string, headers map[string]string) string {
 	case matchAny(ua, "aider"):
 		return Aider
 	case matchAny(ua, "openai-python", "openai-node", "openai-go", "openai-java", "openai-php", "openai/") ||
-		matchAny(headerValue(headers, "x-stainless-lang"), "python", "js", "node", "go", "java") && hasHeader(headers, "x-stainless-package-version"):
+		(matchAny(headerValue(headers, "x-stainless-lang"), "python", "js", "node", "go", "java") && hasHeader(headers, "x-stainless-package-version")):
 		// Stainless-generated OpenAI SDKs set x-stainless-* headers.
-		if lang := strings.ToLower(headerValue(headers, "x-stainless-lang")); lang != "" {
-			switch {
-			case matchAny(lang, "python"):
-				return OpenAISDK
-			case matchAny(lang, "js", "javascript", "node", "typescript"):
-				return OpenAISDK
-			default:
-				return OpenAISDK
-			}
-		}
 		return OpenAISDK
 	case matchAny(ua, "anthropic/", "anthropic-sdk", "anthropic-python", "anthropic-typescript", "@anthropic-ai/sdk"):
 		return Anthropic
@@ -140,7 +147,8 @@ func Detect(userAgent string, headers map[string]string) string {
 		return PythonHTTP
 	case matchAny(ua, "node-fetch", "undici", "axios/", "got/", "node.js", "nodejs"):
 		return NodeHTTP
-	case matchAny(ua, "go-http-client", "go-resty", "fasthttp"):
+	// Go default transport + common Go HTTP stacks (often empty product name).
+	case matchAny(ua, "go-http-client", "go-resty", "fasthttp", "go-http/", "golang/", "net/http"):
 		return GoHTTP
 	case matchAny(ua, "okhttp", "apache-httpclient", "java/"):
 		return JavaHTTP
@@ -148,11 +156,63 @@ func Detect(userAgent string, headers map[string]string) string {
 		return RustHTTP
 	case matchAny(ua, "curl/"):
 		return Curl
+	// Federated social stacks that call OpenAI-compatible gateways.
+	case matchAny(ua, "misskey/", "sharkey/", "megalodon/", "firefish/", "iceshrimp/"):
+		return OpenAISDK
 	}
 	if ua == "" {
+		// Empty UA: still try stainless / anthropic-version already handled above.
+		// Common silent Go callers leave UA blank depending on library config.
+		if matchAny(headerValue(headers, "x-stainless-lang"), "go") {
+			return OpenAISDK
+		}
 		return Unknown
 	}
 	return Unknown
+}
+
+// detectFromProductToken maps free-form product names (headers) to known IDs.
+func detectFromProductToken(token string) string {
+	token = strings.ToLower(strings.TrimSpace(token))
+	if token == "" {
+		return Unknown
+	}
+	switch {
+	case matchAny(token, "claude-code", "claude_code", "claude code", "claude-cli"):
+		return ClaudeCode
+	case matchAny(token, "codex"):
+		return Codex
+	case matchAny(token, "hermes"):
+		return Hermes
+	case matchAny(token, "opencode", "open-code"):
+		return OpenCode
+	case matchAny(token, "grok-cli", "grok_cli", "grok cli", "grok-pager", "grok-shell", "grok-build", "xai"):
+		return GrokCLI
+	case matchAny(token, "cline"):
+		return Cline
+	case matchAny(token, "roo-code", "roocode"):
+		return RooCode
+	case matchAny(token, "cursor"):
+		return Cursor
+	case matchAny(token, "continue"):
+		return Continue
+	case matchAny(token, "windsurf", "codeium"):
+		return Windsurf
+	case matchAny(token, "aider"):
+		return Aider
+	case matchAny(token, "misskey", "sharkey", "megalodon"):
+		return OpenAISDK
+	case matchAny(token, "python"):
+		return PythonHTTP
+	case matchAny(token, "node", "nodejs"):
+		return NodeHTTP
+	case matchAny(token, "go", "golang"):
+		return GoHTTP
+	case matchAny(token, "curl"):
+		return Curl
+	default:
+		return Unknown
+	}
 }
 
 // Label returns a short human label for a client type id.

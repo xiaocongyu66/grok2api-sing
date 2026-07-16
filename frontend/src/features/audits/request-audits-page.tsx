@@ -104,10 +104,16 @@ export function RequestAuditsPage() {
             tooltip={t("audits.pricingDescription")}
           />
         </div>
-        <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 xl:grid-cols-5">
           <AuditTokenMetric icon={ArrowUp} loading={summaryLoading} label={t("audits.input")} value={formatNumber(summary?.usage.inputTokens ?? 0, i18n.language, 0)} />
-          <AuditTokenMetric icon={ArrowDown} loading={summaryLoading} label={t("audits.output")} value={formatNumber(summary?.usage.outputTokens ?? 0, i18n.language, 0)} />
+          <AuditTokenMetric
+            icon={Database}
+            loading={summaryLoading}
+            label={t("audits.uncachedInput")}
+            value={formatNumber(Math.max(0, (summary?.usage.inputTokens ?? 0) - (summary?.usage.cachedInputTokens ?? 0)), i18n.language, 0)}
+          />
           <AuditTokenMetric icon={Database} loading={summaryLoading} label={t("audits.cached")} value={formatNumber(summary?.usage.cachedInputTokens ?? 0, i18n.language, 0)} />
+          <AuditTokenMetric icon={ArrowDown} loading={summaryLoading} label={t("audits.output")} value={formatNumber(summary?.usage.outputTokens ?? 0, i18n.language, 0)} />
           <AuditTokenMetric icon={BrainCircuit} loading={summaryLoading} label={t("audits.reasoning")} value={formatNumber(summary?.usage.reasoningTokens ?? 0, i18n.language, 0)} />
         </div>
       </section>
@@ -292,21 +298,32 @@ const CLIENT_LABELS: Record<string, string> = {
   anthropic_sdk: "Anthropic SDK",
   node: "Node",
   python: "Python",
-  go: "Go",
+  go: "Go 客户端",
   java: "Java",
   rust: "Rust",
   curl: "curl",
   legacy: "历史请求",
-  unknown: "Unknown",
+  unknown: "未知客户端",
 };
 
 function ClientTypeValue({ type, userAgent, ip }: { type?: string; userAgent?: string; ip?: string }) {
   const id = (type ?? "").trim() || "legacy";
   const label = CLIENT_LABELS[id] ?? id;
-  const title = [userAgent, ip].filter(Boolean).join(" · ") || id;
+  // Always surface UA in tooltip so operators can diagnose "未知/Go" without guessing.
+  const title = [
+    userAgent ? `UA: ${userAgent}` : "UA: (empty)",
+    ip ? `IP: ${ip}` : null,
+    `type: ${id}`,
+  ].filter(Boolean).join("\n");
+  const uaHint = userAgent
+    ? (userAgent.length > 48 ? `${userAgent.slice(0, 48)}…` : userAgent)
+    : (id === "unknown" ? "(无 User-Agent)" : null);
   return (
-    <div className="min-w-0" title={title}>
+    <div className="min-w-0 max-w-[11rem]" title={title}>
       <span className="block truncate text-xs font-medium">{label}</span>
+      {uaHint ? (
+        <span className="mt-0.5 block truncate text-[10px] leading-snug text-muted-foreground">{uaHint}</span>
+      ) : null}
       {ip ? <span className="mt-0.5 block truncate text-[11px] tabular-nums text-muted-foreground">{ip}</span> : null}
     </div>
   );
@@ -360,19 +377,21 @@ function UsageDetails({ audit, locale }: { audit: AuditDTO; locale: string }) {
   if (audit.operation === "image" || audit.operation === "image_edit" || audit.mediaInputImages > 0 || audit.mediaOutputImages > 0) {
     return <MediaUsage input={t("audits.imageCount", { count: audit.mediaInputImages })} output={t("audits.imageCount", { count: audit.mediaOutputImages })} />;
   }
+  const uncached = Math.max(0, audit.inputTokens - audit.cachedInputTokens);
   const items = [
     { label: t("audits.input"), value: audit.inputTokens },
-    { label: t("audits.output"), value: audit.outputTokens },
+    { label: t("audits.uncachedInput"), value: uncached },
     { label: t("audits.cached"), value: audit.cachedInputTokens },
+    { label: t("audits.output"), value: audit.outputTokens },
     { label: t("audits.reasoning"), value: audit.reasoningTokens },
   ];
   return (
-    <div className="w-full max-w-[260px]">
+    <div className="w-full max-w-[280px]">
       <div className="grid grid-cols-2 gap-1">
         {items.map((item) => (
-          <div key={item.label} className="flex h-7 items-center justify-between rounded-md bg-muted/55 px-2 text-[11px]">
-            <span className="text-muted-foreground">{item.label}</span>
-            <span className="font-medium tabular-nums">{formatNumber(item.value, locale)}</span>
+          <div key={item.label} className="flex h-7 min-w-0 items-center justify-between gap-1 rounded-md bg-muted/55 px-2 text-[11px]">
+            <span className="shrink-0 text-muted-foreground">{item.label}</span>
+            <span className="truncate font-medium tabular-nums">{formatNumber(item.value, locale)}</span>
           </div>
         ))}
       </div>
