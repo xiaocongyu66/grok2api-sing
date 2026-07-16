@@ -420,11 +420,15 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	now := time.Now().UTC()
 	switch {
 	case transportErr == nil && status >= 200 && status < 400:
+		// Process-local admin rates (restart clears). Must record here: health
+		// alone is persisted to DB, but success/failure rates used to stay 0.
+		m.recordRequest(nodeID, true)
 		value.Health = min(1, value.Health+0.1)
 		value.FailureCount = 0
 		value.CooldownUntil = nil
 		value.LastError = ""
 	case status == http.StatusUnauthorized || status == http.StatusTooManyRequests:
+		// Account/auth limits — not a proxy outcome for the report rates.
 		return
 	case scope == domain.ScopeBuild && status == http.StatusForbidden:
 		// Build 403 可能是账号权限、额度、Token 或出口策略，响应体由网关层
@@ -437,6 +441,7 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 			// unrelated accounts.
 			return
 		}
+		m.recordRequest(nodeID, false)
 		value.FailureCount++
 		value.Health = max(0.05, value.Health*0.7)
 		value.CooldownUntil = nil
@@ -445,6 +450,7 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.invalidateClientLocked(nodeID)
 		m.mu.Unlock()
 	default:
+		m.recordRequest(nodeID, false)
 		value.FailureCount++
 		value.Health = max(0.05, value.Health*0.7)
 		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))

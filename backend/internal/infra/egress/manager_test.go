@@ -287,6 +287,33 @@ func TestConsoleFallsBackToWebAndSharesSSOResinIdentity(t *testing.T) {
 	}
 }
 
+func TestFeedbackRecordsRuntimeRequestStats(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &mutableEgressRepository{node: domain.Node{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	manager := NewManager(repository, cipher)
+
+	manager.Feedback(context.Background(), 1, http.StatusOK, nil)
+	manager.Feedback(context.Background(), 1, http.StatusOK, nil)
+	manager.Feedback(context.Background(), 1, 0, errors.New("dial timeout"))
+	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	// Account-level codes must not pollute proxy success/failure rates.
+	manager.Feedback(context.Background(), 1, http.StatusUnauthorized, nil)
+	manager.Feedback(context.Background(), 1, http.StatusTooManyRequests, nil)
+
+	success, failure, _, _, _, _, _ := manager.RuntimeStats(1)
+	if success != 2 || failure != 2 {
+		t.Fatalf("runtime stats success=%d failure=%d, want 2/2", success, failure)
+	}
+	// Direct (node 0) must not invent a stats bucket.
+	success, failure, _, _, _, _, _ = manager.RuntimeStats(0)
+	if success != 0 || failure != 0 {
+		t.Fatalf("node 0 stats success=%d failure=%d, want 0/0", success, failure)
+	}
+}
+
 func TestBuildForbiddenDoesNotPoisonEgressNode(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
