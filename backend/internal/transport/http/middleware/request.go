@@ -134,10 +134,21 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 			}
 		}
 		clientType := clientid.Detect(userAgent, headers)
+		// Prefer Gin route template (no user-controlled path segments) for logs.
+		logPath := c.FullPath()
+		if logPath == "" {
+			logPath = sanitizeLogValue(path)
+		}
+		logMethod := c.Request.Method
+		switch logMethod {
+		case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions:
+		default:
+			logMethod = "OTHER"
+		}
 		attrs := []any{
 			"request_id", sanitizeLogValue(fmt.Sprint(requestID)),
-			"method", sanitizeLogValue(c.Request.Method),
-			"path", sanitizeLogValue(path),
+			"method", logMethod,
+			"path", logPath,
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(startedAt).Milliseconds(),
 			"client_ip", sanitizeLogValue(c.ClientIP()),

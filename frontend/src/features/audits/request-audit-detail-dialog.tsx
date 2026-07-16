@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Braces, Clock, FileText, KeyRound, Network, Server, TriangleAlert } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -14,16 +14,18 @@ import { formatDateTime, formatNumber } from "@/shared/lib/format";
 
 export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit: AuditDTO | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   const { t, i18n } = useTranslation();
-  const [selectedNumber, setSelectedNumber] = useState<number | null>(null);
+  // Scope selection to the open audit so switching rows resets without an effect setState.
+  const selectionScope = open && audit ? audit.id : "";
+  const [selected, setSelected] = useState<{ scope: string; number: number | null }>({ scope: "", number: null });
+  if (selected.scope !== selectionScope) {
+    setSelected({ scope: selectionScope, number: null });
+  }
+  const selectedNumber = selected.scope === selectionScope ? selected.number : null;
   const detailQuery = useQuery({
     queryKey: ["request-audits", "detail", audit?.id],
     queryFn: () => getRequestAudit(audit?.id ?? ""),
     enabled: open && audit !== null,
   });
-
-  useEffect(() => {
-    setSelectedNumber(null);
-  }, [audit?.id, open]);
 
   const attempts = detailQuery.data?.attempts ?? [];
   const selectedAttempt = attempts.find((attempt) => attempt.number === selectedNumber) ?? attempts[0];
@@ -58,7 +60,7 @@ export function RequestAuditDetailDialog({ audit, open, onOpenChange }: { audit:
                       attempt={attempt}
                       locale={i18n.language}
                       selected={attempt.number === selectedAttempt.number}
-                      onClick={() => setSelectedNumber(attempt.number)}
+                      onClick={() => setSelected({ scope: selectionScope, number: attempt.number })}
                     />
                   ))}
                 </div>

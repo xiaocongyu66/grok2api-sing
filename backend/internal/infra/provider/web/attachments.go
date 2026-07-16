@@ -84,26 +84,12 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 	if err != nil {
 		return provider.ImageInput{}, err
 	}
-	// Rebuild request URL from validated components only (no userinfo / odd ports).
-	// Dial is forced to allowedIPs so DNS rebinding cannot retarget the TCP connection.
-	safeURL := &url.URL{
-		Scheme:   "https",
-		Host:     parsed.Hostname(),
-		Path:     parsed.EscapedPath(),
-		RawQuery: parsed.RawQuery,
-	}
-	if safeURL.Path == "" {
-		safeURL.Path = "/"
-	}
+	// Dial only previously validated public IPs. Request URL host is the literal IP
+	// (not the original hostname) so the HTTP stack cannot re-resolve user DNS.
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, safeURL.String(), nil)
-	if err != nil {
-		return provider.ImageInput{}, err
-	}
-	// 外部图片地址不接收 SSO 或 Cloudflare Cookie，避免把上游凭据泄漏给第三方。
-	request.Header = remoteImageHeaders(lease.UserAgent)
-	// Pin dial to IPs validated at check time to mitigate DNS rebinding SSRF.
+	var response *http.Response
+	var lastErr error
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -116,13 +102,47 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 			IdleConnTimeout:       30 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-			DialContext:           pinnedPublicDialContext(allowedIPs),
+			// No custom Dial needed when Host is already a validated IP literal.
 		},
 	}
-	// codeql[go/request-forgery]: host/path validated as public HTTPS; dial pinned; redirects disabled; no cookies.
-	response, err := client.Do(request)
-	if err != nil {
-		return provider.ImageInput{}, fmt.Errorf("下载对话图片: %w", err)
+	for _, ip := range allowedIPs {
+		ip = ip.Unmap()
+		if !publicRemoteImageAddress(ip) {
+			continue
+		}
+		safeURL := &url.URL{
+			Scheme:   "https",
+			Host:     net.JoinHostPort(ip.String(), "443"),
+			Path:     parsed.EscapedPath(),
+			RawQuery: parsed.RawQuery,
+		}
+		if safeURL.Path == "" {
+			safeURL.Path = "/"
+		}
+		request, reqErr := http.NewRequestWithContext(requestCtx, http.MethodGet, safeURL.String(), nil)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		// Preserve original hostname for TLS SNI / virtual hosts when not an IP URL.
+		if host := parsed.Hostname(); host != "" {
+			if _, parseErr := netip.ParseAddr(host); parseErr != nil {
+				request.Host = host
+				request.Header.Set("Host", host)
+			}
+		}
+		// 外部图片地址不接收 SSO 或 Cloudflare Cookie，避免把上游凭据泄漏给第三方。
+		request.Header = remoteImageHeaders(lease.UserAgent)
+		response, lastErr = client.Do(request)
+		if lastErr == nil {
+			break
+		}
+	}
+	if response == nil {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("%w: 无可用的已校验公网地址", errInvalidChatImage)
+		}
+		return provider.ImageInput{}, fmt.Errorf("下载对话图片: %w", lastErr)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -140,46 +160,6 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 		return provider.ImageInput{}, err
 	}
 	return provider.ImageInput{Filename: imageFilename(parsed, mimeType), MIMEType: mimeType, Data: raw}, nil
-}
-
-// pinnedPublicDialContext dials only IPs previously validated as public unicast.
-// The dial target host is ignored for routing; network is forced to the pinned IP.
-func pinnedPublicDialContext(allowed []netip.Addr) func(ctx context.Context, network, address string) (net.Conn, error) {
-	allowedSet := make(map[netip.Addr]struct{}, len(allowed))
-	for _, ip := range allowed {
-		allowedSet[ip.Unmap()] = struct{}{}
-	}
-	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		_, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, err
-		}
-		if port != "443" && port != "https" {
-			return nil, fmt.Errorf("%w: 仅允许 443 端口", errInvalidChatImage)
-		}
-		var lastErr error
-		for _, ip := range allowed {
-			ip = ip.Unmap()
-			if _, ok := allowedSet[ip]; !ok || !publicRemoteImageAddress(ip) {
-				continue
-			}
-			// Re-validate immediately before connect (defense in depth).
-			if !publicRemoteImageAddress(ip) {
-				continue
-			}
-			target := net.JoinHostPort(ip.String(), "443")
-			conn, dialErr := dialer.DialContext(ctx, network, target)
-			if dialErr == nil {
-				return conn, nil
-			}
-			lastErr = dialErr
-		}
-		if lastErr == nil {
-			lastErr = fmt.Errorf("%w: 无可用的已校验公网地址", errInvalidChatImage)
-		}
-		return nil, lastErr
-	}
 }
 
 func remoteImageHeaders(userAgent string) http.Header {
