@@ -6,6 +6,9 @@ func TestIsRetryableStatusDefaults(t *testing.T) {
 	if !IsRetryableStatus(429, nil, true) || !IsRetryableStatus(503, nil, true) {
 		t.Fatal("429/503 should retry by default")
 	}
+	if IsRetryableStatus(403, nil, true) {
+		t.Fatal("403 should not be in default retry codes (avoid pool cascade)")
+	}
 	if !IsRetryableStatus(502, nil, true) {
 		t.Fatal("5xx should retry when retryServerErrors")
 	}
@@ -17,6 +20,9 @@ func TestIsRetryableStatusDefaults(t *testing.T) {
 	}
 	if IsRetryableStatus(401, []int{429, 503}, true) {
 		t.Fatal("401 should not retry")
+	}
+	if !IsRetryableStatus(403, []int{403, 429}, false) {
+		t.Fatal("explicit 403 should retry when configured")
 	}
 }
 

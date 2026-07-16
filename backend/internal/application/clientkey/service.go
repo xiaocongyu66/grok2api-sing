@@ -150,7 +150,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 	if s.cipher == nil {
 		return Created{}, errors.New("客户端 Key 加密器未配置")
 	}
-	encryptedSecret, err := s.cipher.Encrypt(raw)
+	encryptedSecret, err := s.cipher.EncryptAAD(raw, security.ClientKeyAAD(prefix))
 	if err != nil {
 		return Created{}, fmt.Errorf("加密客户端 Key: %w", err)
 	}
@@ -176,7 +176,7 @@ func (s *Service) RevealSecret(ctx context.Context, id uint64) (string, error) {
 	if s.cipher == nil || value.EncryptedSecret == "" {
 		return "", ErrSecretUnavailable
 	}
-	raw, err := s.cipher.Decrypt(value.EncryptedSecret)
+	raw, err := s.cipher.DecryptAAD(value.EncryptedSecret, security.ClientKeyAAD(value.Prefix))
 	if err != nil {
 		return "", fmt.Errorf("解密客户端 Key: %w", err)
 	}

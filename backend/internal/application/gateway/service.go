@@ -24,6 +24,7 @@ import (
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -110,6 +111,10 @@ type Service struct {
 	mediaWorker    int
 	mediaQueueFull atomic.Uint64
 	logger         *slog.Logger
+
+	retryMu            sync.RWMutex
+	retryStatusCodes   []int
+	retryServerErrors  bool
 }
 
 func (s *Service) ConfigureMedia(repository repository.MediaJobRepository, concurrency int) {
@@ -123,7 +128,10 @@ func (s *Service) ConfigureMedia(repository repository.MediaJobRepository, concu
 }
 
 func NewService(models routeResolver, audits auditRecorder, accounts *accountapp.Service, clientKeys *clientkeyapp.Service, providers *provider.Registry, selector *Selector, responses repository.ResponseRepository, maxAttempts int) *Service {
-	service := &Service{models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers, selector: selector, responses: responses, logger: slog.Default()}
+	service := &Service{
+		models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers, selector: selector, responses: responses, logger: slog.Default(),
+		retryStatusCodes: append([]int(nil), config.DefaultRetryStatusCodes...), retryServerErrors: true,
+	}
 	service.UpdateMaxAttempts(maxAttempts)
 	return service
 }
@@ -135,6 +143,18 @@ func (s *Service) SetLogger(logger *slog.Logger) {
 }
 
 func (s *Service) UpdateMaxAttempts(maxAttempts int) { s.maxAttempts.Store(int64(maxAttempts)) }
+
+// UpdateRetryPolicy applies hot-reloaded failover status codes from runtime settings.
+func (s *Service) UpdateRetryPolicy(codes []int, retryServerErrors bool) {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	if len(codes) == 0 {
+		s.retryStatusCodes = append([]int(nil), config.DefaultRetryStatusCodes...)
+	} else {
+		s.retryStatusCodes = append([]int(nil), codes...)
+	}
+	s.retryServerErrors = retryServerErrors
+}
 
 func (s *Service) CreateResponse(ctx context.Context, input Input) (*Result, error) {
 	input.Operation = audit.OperationResponses
@@ -483,7 +503,9 @@ attemptLoop:
 		}
 		egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden
 		finalEgressForbidden := egressForbidden && (attempt > 0 || attempt+1 >= attempts)
-		if isRetryable(response.StatusCode) && !finalEgressForbidden {
+		// 403 always enters this path for body classification and OAuth recovery, even when
+		// not listed in retryStatusCodes (default excludes 403 to avoid pool-wide cascade).
+		if (s.isRetryable(response.StatusCode) || response.StatusCode == http.StatusForbidden) && !finalEgressForbidden {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 			body, _ := readRetryableBody(response.Body)
 			if egressForbidden {
@@ -517,6 +539,14 @@ attemptLoop:
 					continue attemptLoop
 				}
 				goto handleResponse
+			}
+			// Non-account-scoped 403: fail fast without cascading across the pool.
+			// Account-scoped 403 (quota/denial) may still fail over when listed or classified.
+			if response.StatusCode == http.StatusForbidden && !lastFailure.AccountScoped && !s.isRetryable(http.StatusForbidden) {
+				lease.Release()
+				lastErr = fmt.Errorf("上游返回 %d", response.StatusCode)
+				s.logger.Warn("upstream_request_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "upstream_code", lastFailure.UpstreamCode, "account_scoped", lastFailure.AccountScoped)
+				break
 			}
 			failureHandled := false
 			if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
@@ -854,8 +884,12 @@ func (b *finalizingBody) Close() error {
 	return err
 }
 
-func isRetryable(status int) bool {
-	return status == 402 || status == 403 || status == 429 || status >= 500
+func (s *Service) isRetryable(status int) bool {
+	s.retryMu.RLock()
+	codes := s.retryStatusCodes
+	retryServerErrors := s.retryServerErrors
+	s.retryMu.RUnlock()
+	return config.IsRetryableStatus(status, codes, retryServerErrors)
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

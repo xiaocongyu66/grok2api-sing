@@ -14,12 +14,15 @@ server:
   requestTimeout: 2h
   # [按需修改] 仅在本地或受信任环境开启，生产环境保持 false。
   swaggerEnabled: false
+  # [按需修改] 反代 CIDR/IP；留空则不信任客户端伪造的 X-Forwarded-For。
+  # 例如在 nginx 后面：trustedProxies: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+  trustedProxies: []
 
 auth:
   # [通常不要修改] 管理端访问与刷新令牌有效期。
   accessTokenTTL: 15m
   refreshTokenTTL: 720h
-  # [按需修改] 外部地址使用 HTTPS 时必须设为 true。
+  # [必须修改：HTTPS 反代/公网] 使用 HTTPS 时设为 true，否则 Refresh Cookie 可能被明文传输。
   secureCookies: false
 
 secrets:
@@ -102,8 +105,9 @@ routing:
   cooldownMax: 30m
   capacityWait: 500ms
   maxAttempts: 3
-  # [按需修改] 上游返回这些状态码时换账号重试（默认含 429/503）。
-  retryStatusCodes: [402, 403, 429, 503]
+  # [按需修改] 上游返回这些状态码时换账号重试（默认 402/429/503；403 默认不换号以免连坐）。
+  # 账号级永久拒绝仍会走凭据刷新；Web 出口反爬 403 仍按节点处理。
+  retryStatusCodes: [402, 429, 503]
   # [通常不要修改] true 时所有 5xx 都会触发换号。
   retryServerErrors: true
   # Prompt 缓存亲和：稳定 x-grok-conv-id，提高上游真实 cached_tokens 命中（不伪造 token）。

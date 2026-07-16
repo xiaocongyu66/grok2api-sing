@@ -393,7 +393,8 @@ func TestGatewayPreservesRepeatedSystemicForbiddenWithoutCoolingAccounts(t *test
 		t.Fatalf("upstream failure = %#v", upstreamFailure)
 	}
 	attempts := adapter.Attempts()
-	if len(attempts) != 2 || attempts[0] != credentials[0].ID || attempts[1] != credentials[1].ID {
+	// Non-account-scoped 403 fails fast (no pool cascade); only the first account is tried.
+	if len(attempts) != 1 || attempts[0] != credentials[0].ID {
 		t.Fatalf("attempts = %#v", attempts)
 	}
 	for _, credential := range credentials {
@@ -406,7 +407,7 @@ func TestGatewayPreservesRepeatedSystemicForbiddenWithoutCoolingAccounts(t *test
 		}
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 1 || logs[0].StatusCode != http.StatusForbidden || logs[0].ErrorCode != "upstream_forbidden" || logs[0].AccountID == nil || *logs[0].AccountID != credentials[1].ID {
+	if err != nil || total != 1 || logs[0].StatusCode != http.StatusForbidden || logs[0].ErrorCode != "upstream_forbidden" || logs[0].AccountID == nil || *logs[0].AccountID != credentials[0].ID {
 		t.Fatalf("audit = %#v, total=%d, err=%v", logs, total, err)
 	}
 }

@@ -38,13 +38,16 @@ import (
 )
 
 type Dependencies struct {
-	Logger             *slog.Logger
-	RequestTimeout     time.Duration
-	MaxBodyBytes       int64
-	ConcurrencyGate    *middleware.ConcurrencyGate
+	Logger              *slog.Logger
+	RequestTimeout      time.Duration
+	MaxBodyBytes        int64
+	ConcurrencyGate     *middleware.ConcurrencyGate
 	PromptCacheAffinity *promptcache.Resolver
 	Connections         connections.Tracker
-	SecureCookies      bool
+	SecureCookies       bool
+	// TrustedProxies are reverse-proxy CIDRs/IPs trusted for client IP headers.
+	// Empty disables trusting X-Forwarded-For from untrusted clients.
+	TrustedProxies     []string
 	SwaggerEnabled     bool
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
@@ -113,6 +116,13 @@ func New(deps Dependencies) *gin.Engine {
 		deps.Logger = slog.Default()
 	}
 	router := gin.New()
+	// Empty trusted proxies: ClientIP ignores client-supplied X-Forwarded-For (anti-spoof).
+	// When operators set reverse-proxy CIDRs, honor forwarded headers from those hops only.
+	if len(deps.TrustedProxies) == 0 {
+		_ = router.SetTrustedProxies(nil)
+	} else if err := router.SetTrustedProxies(deps.TrustedProxies); err != nil {
+		panic("httpserver: invalid trustedProxies: " + err.Error())
+	}
 	router.Use(gin.Recovery(), middleware.RequestID(), middleware.SecurityHeaders(), middleware.MaxBodyBytes(deps.MaxBodyBytes), middleware.Timeout(deps.RequestTimeout), middleware.AccessLog(deps.Logger))
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 	router.GET("/readyz", func(c *gin.Context) {

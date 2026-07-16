@@ -155,12 +155,13 @@ func TestParseChatImageDataURIValidatesContent(t *testing.T) {
 
 func TestRemoteChatImageURLBlocksPrivateNetworks(t *testing.T) {
 	for _, value := range []string{"http://example.com/image.png", "https://127.0.0.1/image.png", "https://169.254.169.254/latest/meta-data", "https://[::1]/image.png", "https://[::ffff:127.0.0.1]/image.png"} {
-		if _, err := validateRemoteImageURL(context.Background(), value); err == nil {
+		if _, _, err := validateRemoteImageURL(context.Background(), value); err == nil {
 			t.Fatalf("unsafe image URL accepted: %s", value)
 		}
 	}
-	if value, err := validateRemoteImageURL(context.Background(), "https://8.8.8.8/image.png"); err != nil || value.Hostname() != "8.8.8.8" {
-		t.Fatalf("public image URL rejected: value=%v err=%v", value, err)
+	value, ips, err := validateRemoteImageURL(context.Background(), "https://8.8.8.8/image.png")
+	if err != nil || value.Hostname() != "8.8.8.8" || len(ips) != 1 || ips[0].String() != "8.8.8.8" {
+		t.Fatalf("public image URL rejected: value=%v ips=%v err=%v", value, ips, err)
 	}
 }
 

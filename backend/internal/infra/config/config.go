@@ -59,6 +59,9 @@ type ServerConfig struct {
 	ReadTimeout           Duration `yaml:"readTimeout"`
 	RequestTimeout        Duration `yaml:"requestTimeout"`
 	SwaggerEnabled        bool     `yaml:"swaggerEnabled"`
+	// TrustedProxies lists reverse-proxy CIDRs/IPs trusted for X-Forwarded-For / X-Real-IP.
+	// Empty means ClientIP uses the direct remote address only (no client-supplied spoofing).
+	TrustedProxies []string `yaml:"trustedProxies"`
 }
 
 type FrontendConfig struct {
@@ -192,7 +195,9 @@ type PromptCacheAffinityConfig struct {
 	TTL Duration `yaml:"ttl"`
 }
 
-var DefaultRetryStatusCodes = []int{402, 403, 429, 503}
+// DefaultRetryStatusCodes: 403 is intentionally excluded so permanent bans do not cascade across the pool.
+// Web egress anti-bot 403 is still handled separately via RetryForbiddenAsEgress.
+var DefaultRetryStatusCodes = []int{402, 429, 503}
 
 type RoutingConfig struct {
 	StickyTTL    Duration `yaml:"stickyTTL"`
@@ -476,7 +481,14 @@ func (c Config) Validate() error {
 			return errors.New("provider.web 手动 x-statsig-id 格式无效")
 		}
 	case StatsigModeURL:
-		if err := signerurl.Validate(c.Provider.Web.StatsigSignerURL); err != nil {
+		signer := strings.TrimSpace(c.Provider.Web.StatsigSignerURL)
+		if signer == "" {
+			return errors.New("provider.web.statsigSignerURL 不能为空（url 模式须显式配置自建或受信签名服务）")
+		}
+		if strings.EqualFold(signer, DefaultStatsigSignerURL) {
+			return fmt.Errorf("provider.web.statsigSignerURL 不能使用内置第三方默认地址 %s，请配置自建签名服务或改用 manual 模式", DefaultStatsigSignerURL)
+		}
+		if err := signerurl.Validate(signer); err != nil {
 			return fmt.Errorf("provider.web Statsig 签名 URL 无效: %w", err)
 		}
 	default:
@@ -558,7 +570,8 @@ func defaultConfig() Config {
 				UserAgent: RecommendedBuildUserAgent,
 			},
 			Web: WebProviderConfig{
-				BaseURL: "https://grok.com", StatsigMode: StatsigModeURL, StatsigSignerURL: DefaultStatsigSignerURL,
+				// Default to a local/self-hosted signer hostname, never the historical third-party public host.
+				BaseURL: "https://grok.com", StatsigMode: StatsigModeURL, StatsigSignerURL: "http://127.0.0.1:8788/sign",
 				QuotaTimeout: Duration(25 * time.Second),
 				ChatTimeout:  Duration(2 * time.Minute), ImageTimeout: Duration(3 * time.Minute),
 				VideoTimeout:     Duration(15 * time.Minute),

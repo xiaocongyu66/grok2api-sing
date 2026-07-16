@@ -53,7 +53,13 @@ go run ./cmd/grok2api --config /path/to/config.yaml --listen 0.0.0.0:8000
 - `/swagger/index.html`：公开 API Swagger，仅在 `server.swaggerEnabled: true` 时注册
 - `frontend.staticPath`：前端静态目录，默认 `./frontend/dist`
 
-详细协议说明见 [`docs`](./docs)。
+详细协议说明见 [`docs`](./docs)：
+
+| 文档 | 说明 |
+| --- | --- |
+| [`PROVIDER_ARCHITECTURE.md`](./docs/PROVIDER_ARCHITECTURE.md) | Provider 架构 |
+| [`RESPONSES_COMPATIBILITY.md`](./docs/RESPONSES_COMPATIBILITY.md) | Responses 协议兼容 |
+| [`SECURITY_AUDIT.md`](./docs/SECURITY_AUDIT.md) | 安全与逻辑审计报告 |
 
 修改公开接口注释后，在仓库根目录执行 `make swagger` 更新 `backend/docs/docs.go`、`swagger.json` 与 `swagger.yaml`。生产配置应保持 `server.swaggerEnabled: false`。
 

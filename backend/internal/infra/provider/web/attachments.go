@@ -80,7 +80,7 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 	if strings.HasPrefix(strings.ToLower(input), "data:") {
 		return parseChatImageDataURI(input, maxBytes)
 	}
-	parsed, err := validateRemoteImageURL(ctx, input)
+	parsed, allowedIPs, err := validateRemoteImageURL(ctx, input)
 	if err != nil {
 		return provider.ImageInput{}, err
 	}
@@ -92,7 +92,23 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 	}
 	// 外部图片地址不接收 SSO 或 Cloudflare Cookie，避免把上游凭据泄漏给第三方。
 	request.Header = remoteImageHeaders(lease.UserAgent)
-	response, err := lease.Do(request)
+	// Pin dial to IPs validated at check time to mitigate DNS rebinding SSRF.
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			Proxy:                 nil,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          4,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			DialContext:           pinnedPublicDialContext(allowedIPs),
+		},
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return provider.ImageInput{}, fmt.Errorf("下载对话图片: %w", err)
 	}
@@ -112,6 +128,46 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 		return provider.ImageInput{}, err
 	}
 	return provider.ImageInput{Filename: imageFilename(parsed, mimeType), MIMEType: mimeType, Data: raw}, nil
+}
+
+// pinnedPublicDialContext dials only IPs previously validated as public unicast.
+// The dial target host is ignored for routing; network is forced to the pinned IP.
+func pinnedPublicDialContext(allowed []netip.Addr) func(ctx context.Context, network, address string) (net.Conn, error) {
+	allowedSet := make(map[netip.Addr]struct{}, len(allowed))
+	for _, ip := range allowed {
+		allowedSet[ip.Unmap()] = struct{}{}
+	}
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		_, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		if port != "443" && port != "https" {
+			return nil, fmt.Errorf("%w: 仅允许 443 端口", errInvalidChatImage)
+		}
+		var lastErr error
+		for _, ip := range allowed {
+			ip = ip.Unmap()
+			if _, ok := allowedSet[ip]; !ok || !publicRemoteImageAddress(ip) {
+				continue
+			}
+			// Re-validate immediately before connect (defense in depth).
+			if !publicRemoteImageAddress(ip) {
+				continue
+			}
+			target := net.JoinHostPort(ip.String(), "443")
+			conn, dialErr := dialer.DialContext(ctx, network, target)
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("%w: 无可用的已校验公网地址", errInvalidChatImage)
+		}
+		return nil, lastErr
+	}
 }
 
 func remoteImageHeaders(userAgent string) http.Header {
@@ -166,38 +222,48 @@ func supportedChatImageMIME(value string) bool {
 	}
 }
 
-func validateRemoteImageURL(ctx context.Context, raw string) (*url.URL, error) {
+// validateRemoteImageURL validates scheme/host and returns only public unicast IPs for dial pinning.
+func validateRemoteImageURL(ctx context.Context, raw string) (*url.URL, []netip.Addr, error) {
 	if len(raw) == 0 || len(raw) > maxRemoteImageURLBytes {
-		return nil, fmt.Errorf("%w: URL 为空或过长", errInvalidChatImage)
+		return nil, nil, fmt.Errorf("%w: URL 为空或过长", errInvalidChatImage)
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || (parsed.Port() != "" && parsed.Port() != "443") {
-		return nil, fmt.Errorf("%w: URL 必须是无用户信息的 HTTPS 地址", errInvalidChatImage)
+		return nil, nil, fmt.Errorf("%w: URL 必须是无用户信息的 HTTPS 地址", errInvalidChatImage)
 	}
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return nil, fmt.Errorf("%w: URL 指向受限主机", errInvalidChatImage)
+		return nil, nil, fmt.Errorf("%w: URL 指向受限主机", errInvalidChatImage)
 	}
 	if address, err := netip.ParseAddr(host); err == nil {
 		address = address.Unmap()
 		if !publicRemoteImageAddress(address) {
-			return nil, fmt.Errorf("%w: URL 指向非公网地址", errInvalidChatImage)
+			return nil, nil, fmt.Errorf("%w: URL 指向非公网地址", errInvalidChatImage)
 		}
-		return parsed, nil
+		return parsed, []netip.Addr{address}, nil
 	}
 	resolveCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	addresses, err := net.DefaultResolver.LookupIPAddr(resolveCtx, host)
 	if err != nil || len(addresses) == 0 {
-		return nil, fmt.Errorf("%w: 无法解析图片主机", errInvalidChatImage)
+		return nil, nil, fmt.Errorf("%w: 无法解析图片主机", errInvalidChatImage)
 	}
+	allowed := make([]netip.Addr, 0, len(addresses))
 	for _, value := range addresses {
 		address, ok := netip.AddrFromSlice(value.IP)
-		if !ok || !publicRemoteImageAddress(address.Unmap()) {
-			return nil, fmt.Errorf("%w: URL 解析到非公网地址", errInvalidChatImage)
+		if !ok {
+			return nil, nil, fmt.Errorf("%w: URL 解析到无效地址", errInvalidChatImage)
 		}
+		address = address.Unmap()
+		if !publicRemoteImageAddress(address) {
+			return nil, nil, fmt.Errorf("%w: URL 解析到非公网地址", errInvalidChatImage)
+		}
+		allowed = append(allowed, address)
 	}
-	return parsed, nil
+	if len(allowed) == 0 {
+		return nil, nil, fmt.Errorf("%w: 无法解析图片主机", errInvalidChatImage)
+	}
+	return parsed, allowed, nil
 }
 
 func publicRemoteImageAddress(address netip.Addr) bool {

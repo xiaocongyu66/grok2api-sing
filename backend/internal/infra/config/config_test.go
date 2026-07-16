@@ -218,6 +218,14 @@ func TestValidateStatsigModes(t *testing.T) {
 	if err := remote.Validate(); err == nil {
 		t.Fatal("public plaintext Statsig signer URL was accepted")
 	}
+	remote.Provider.Web.StatsigSignerURL = DefaultStatsigSignerURL
+	if err := remote.Validate(); err == nil {
+		t.Fatal("third-party default Statsig signer URL was accepted")
+	}
+	remote.Provider.Web.StatsigSignerURL = ""
+	if err := remote.Validate(); err == nil {
+		t.Fatal("empty Statsig signer URL was accepted")
+	}
 }
 
 func TestValidateInfrastructureDrivers(t *testing.T) {
