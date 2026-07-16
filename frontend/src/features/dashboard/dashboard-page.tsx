@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Box, CircleDollarSign, Gauge, MonitorSmartphone, RefreshCw, Users, Zap } from "lucide-react";
+import { Activity, Box, CircleDollarSign, Gauge, Link2, MonitorSmartphone, Radio, RefreshCw, Users, Zap } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Area, Bar, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
@@ -66,8 +66,8 @@ export function DashboardPage() {
         end: customQuery?.end,
       }),
     placeholderData: (previous) => previous,
-    // Short ranges refresh more often so RPM/TPM stay useful; long custom ranges poll slowly.
-    refetchInterval: period === "custom" ? 60_000 : 30_000,
+    // Poll often enough for live connections; long custom ranges still refresh regularly.
+    refetchInterval: period === "custom" ? 30_000 : 15_000,
   });
 
   function refreshAll(): void {
@@ -125,6 +125,8 @@ export function DashboardPage() {
     : t("dashboard.tpmDetail", { seconds: windowSeconds });
   const periodTotalsDetail = t("dashboard.periodTotalsDetail", { period: periodLabel });
   const clients = dashboard?.clients ?? [];
+  const connections = dashboard?.connections;
+  const liveClients = connections?.clients ?? [];
   const rateDigits = rateIsAverage ? 2 : 0;
 
   return (
@@ -176,6 +178,33 @@ export function DashboardPage() {
           </div>
         ) : null}
       </header>
+
+      <section className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="shrink-0 text-sm font-medium">{t("dashboard.connections")}</h2>
+          <span className="text-[11px] text-muted-foreground">{t("dashboard.connectionsHint")}</span>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <MetricCard icon={<Radio />} label={t("dashboard.liveConnections")} value={formatNumber(connections?.active ?? 0, i18n.language, 0)} detail={t("dashboard.liveConnectionsDetail")} loading={loading} />
+          <MetricCard icon={<Link2 />} label={t("dashboard.peakConnections")} value={formatNumber(connections?.peak ?? 0, i18n.language, 0)} detail={t("dashboard.peakConnectionsDetail")} loading={loading} />
+          <MetricCard icon={<Activity />} label={t("dashboard.totalConnections")} value={formatNumber(connections?.total ?? 0, i18n.language, 0)} detail={t("dashboard.totalConnectionsDetail")} loading={loading} />
+        </div>
+        {loading ? (
+          <div className="flex min-h-12 items-center rounded-lg bg-card px-4"><Spinner /></div>
+        ) : liveClients.length === 0 ? (
+          <p className="rounded-lg bg-card px-4 py-4 text-center text-xs text-muted-foreground">{t("dashboard.liveClientsEmpty")}</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {liveClients.map((item) => (
+              <div key={`live-${item.client}`} className="inline-flex min-w-[7.5rem] items-center gap-2 rounded-lg border border-primary/15 bg-card px-3 py-2" title={item.client}>
+                <Radio className="size-3.5 shrink-0 text-primary" />
+                <span className="text-xs text-muted-foreground">{item.label || item.client}</span>
+                <span className="ml-auto text-sm font-medium tabular-nums">{formatNumber(item.count, i18n.language, 0)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="space-y-4">
         <div className="flex items-center justify-between gap-3">

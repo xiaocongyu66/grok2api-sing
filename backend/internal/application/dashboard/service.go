@@ -7,6 +7,7 @@ import (
 	"time"
 
 	dashboarddomain "github.com/chenyme/grok2api/backend/internal/domain/dashboard"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
 	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
@@ -80,17 +81,27 @@ type Result struct {
 	Series      []SeriesPoint
 	TopModels   []ModelUsage
 	Clients     []ClientUsage
+	// Connections is always live (not cached with period aggregates).
+	Connections dashboarddomain.Connections
 }
 
 // Service 负责 Dashboard 时间范围校验和固定时间桶编排。
 type Service struct {
-	dashboard repository.DashboardRepository
-	now       func() time.Time
-	cache     *resultcache.Cache[string, Result]
+	dashboard   repository.DashboardRepository
+	connections connections.Tracker
+	now         func() time.Time
+	cache       *resultcache.Cache[string, Result]
 }
 
 func NewService(dashboard repository.DashboardRepository) *Service {
 	return &Service{dashboard: dashboard, now: time.Now, cache: resultcache.New[string, Result](32, dashboardCacheTTL)}
+}
+
+// SetConnectionsTracker attaches live /v1 concurrency stats for the dashboard.
+func (s *Service) SetConnectionsTracker(tracker connections.Tracker) {
+	if s != nil {
+		s.connections = tracker
+	}
 }
 
 // Get 返回指定时间范围的 Dashboard 聚合快照。
@@ -122,16 +133,40 @@ func (s *Service) get(ctx context.Context, rawPeriod, rawTimezone, customStart, 
 		}
 		customRange = &r
 	}
+	var result Result
 	if !useCache {
-		return s.load(ctx, period, bucketCount, bucketDays, location, rawNow, customRange)
+		result, err = s.load(ctx, period, bucketCount, bucketDays, location, rawNow, customRange)
+	} else {
+		cacheKey := string(period) + "\x00" + location.String()
+		if customRange != nil {
+			cacheKey += "\x00" + customRange.Start.UTC().Format(time.RFC3339) + "\x00" + customRange.End.UTC().Format(time.RFC3339)
+		}
+		result, err = s.cache.Load(ctx, cacheKey, rawNow, func() (Result, error) {
+			return s.load(ctx, period, bucketCount, bucketDays, location, rawNow, customRange)
+		})
 	}
-	cacheKey := string(period) + "\x00" + location.String()
-	if customRange != nil {
-		cacheKey += "\x00" + customRange.Start.UTC().Format(time.RFC3339) + "\x00" + customRange.End.UTC().Format(time.RFC3339)
+	if err != nil {
+		return Result{}, err
 	}
-	return s.cache.Load(ctx, cacheKey, rawNow, func() (Result, error) {
-		return s.load(ctx, period, bucketCount, bucketDays, location, rawNow, customRange)
-	})
+	// Live concurrency is never cached with period aggregates.
+	result.Connections = s.liveConnections(ctx)
+	return result, nil
+}
+
+func (s *Service) liveConnections(ctx context.Context) dashboarddomain.Connections {
+	if s.connections == nil {
+		return dashboarddomain.Connections{}
+	}
+	stats := s.connections.Snapshot(ctx)
+	clients := make([]dashboarddomain.ClientUsage, 0, len(stats.Clients))
+	for _, item := range stats.Clients {
+		clients = append(clients, dashboarddomain.ClientUsage{
+			Client: item.Client, Label: item.Label, Count: item.Active,
+		})
+	}
+	return dashboarddomain.Connections{
+		Active: stats.Active, Peak: stats.Peak, Total: stats.Total, Clients: clients,
+	}
 }
 
 func (s *Service) load(ctx context.Context, period Period, bucketCount, bucketDays int, location *time.Location, rawNow time.Time, custom *Range) (Result, error) {

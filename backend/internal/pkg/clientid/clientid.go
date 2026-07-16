@@ -18,6 +18,7 @@ const (
 	Aider      = "aider"
 	RooCode    = "roo_code"
 	Windsurf   = "windsurf"
+	ZCode      = "zcode"
 	OpenAISDK  = "openai_sdk"
 	Anthropic  = "anthropic_sdk"
 	NodeHTTP   = "node"
@@ -44,6 +45,7 @@ var Labels = map[string]string{
 	Aider:      "Aider",
 	RooCode:    "Roo Code",
 	Windsurf:   "Windsurf",
+	ZCode:      "ZCode",
 	OpenAISDK:  "OpenAI SDK",
 	Anthropic:  "Anthropic SDK",
 	NodeHTTP:   "Node",
@@ -109,6 +111,8 @@ func Detect(userAgent string, headers map[string]string) string {
 		return Continue
 	case matchAny(ua, "windsurf", "codeium"):
 		return Windsurf
+	case matchAny(ua, "zcode", "z-code", "z_code"):
+		return ZCode
 	case matchAny(ua, "aider"):
 		return Aider
 	case matchAny(ua, "openai-python", "openai-node", "openai-go", "openai-java", "openai-php", "openai/") ||

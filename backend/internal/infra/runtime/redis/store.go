@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
+	"github.com/chenyme/grok2api/backend/internal/pkg/clientid"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -516,6 +519,114 @@ func (l *ConcurrencyLimiter) Current(ctx context.Context, key string) (int, erro
 func (l *ConcurrencyLimiter) CurrentMany(ctx context.Context, keys []string) (map[string]int, error) {
 	return l.store.CurrentMany(ctx, keys)
 }
+
+// ConnectionTracker shares site-wide in-flight /v1 request counts across instances.
+// Keys: {prefix}conn:active, {prefix}conn:peak, {prefix}conn:total, {prefix}conn:clients (hash)
+type ConnectionTracker struct{ store *Store }
+
+func NewConnectionTracker(store *Store) *ConnectionTracker {
+	return &ConnectionTracker{store: store}
+}
+
+var connBeginScript = redisclient.NewScript(`
+local active = redis.call('INCR', KEYS[1])
+redis.call('INCR', KEYS[3])
+local peak = tonumber(redis.call('GET', KEYS[2]) or '0')
+if active > peak then
+  redis.call('SET', KEYS[2], active)
+end
+if ARGV[1] ~= '' then
+  redis.call('HINCRBY', KEYS[4], ARGV[1], 1)
+end
+return active
+`)
+
+var connEndScript = redisclient.NewScript(`
+local active = redis.call('DECR', KEYS[1])
+if active < 0 then
+  redis.call('SET', KEYS[1], 0)
+  active = 0
+end
+if ARGV[1] ~= '' then
+  local n = redis.call('HINCRBY', KEYS[2], ARGV[1], -1)
+  if n <= 0 then
+    redis.call('HDEL', KEYS[2], ARGV[1])
+  end
+end
+return active
+`)
+
+// Begin increments shared active/total, peak, and optional per-client hash.
+func (t *ConnectionTracker) Begin(clientType string) func() {
+	clientType = strings.TrimSpace(clientType)
+	if clientType == "" {
+		clientType = "unknown"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	activeKey := t.store.key("conn", "active")
+	peakKey := t.store.key("conn", "peak")
+	totalKey := t.store.key("conn", "total")
+	clientsKey := t.store.key("conn", "clients")
+	_, _ = connBeginScript.Run(ctx, t.store.client, []string{activeKey, peakKey, totalKey, clientsKey}, clientType).Result()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			endCtx, endCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer endCancel()
+			_ = connEndScript.Run(endCtx, t.store.client, []string{activeKey, clientsKey}, clientType).Err()
+		})
+	}
+}
+
+// Snapshot reads shared active/peak/total and per-client live counts.
+func (t *ConnectionTracker) Snapshot(ctx context.Context) connections.Stats {
+	activeKey := t.store.key("conn", "active")
+	peakKey := t.store.key("conn", "peak")
+	totalKey := t.store.key("conn", "total")
+	clientsKey := t.store.key("conn", "clients")
+	pipe := t.store.client.Pipeline()
+	activeCmd := pipe.Get(ctx, activeKey)
+	peakCmd := pipe.Get(ctx, peakKey)
+	totalCmd := pipe.Get(ctx, totalKey)
+	clientsCmd := pipe.HGetAll(ctx, clientsKey)
+	_, _ = pipe.Exec(ctx)
+	stats := connections.Stats{
+		Active: redisInt64(activeCmd),
+		Peak:   redisInt64(peakCmd),
+		Total:  redisInt64(totalCmd),
+	}
+	if raw, err := clientsCmd.Result(); err == nil && len(raw) > 0 {
+		stats.Clients = make([]connections.ClientCount, 0, len(raw))
+		for id, value := range raw {
+			n, _ := strconv.ParseInt(value, 10, 64)
+			if n <= 0 {
+				continue
+			}
+			stats.Clients = append(stats.Clients, connections.ClientCount{
+				Client: id, Label: clientid.Label(id), Active: n,
+			})
+		}
+		sort.Slice(stats.Clients, func(i, j int) bool {
+			if stats.Clients[i].Active != stats.Clients[j].Active {
+				return stats.Clients[i].Active > stats.Clients[j].Active
+			}
+			return stats.Clients[i].Client < stats.Clients[j].Client
+		})
+	}
+	return stats
+}
+
+func redisInt64(cmd *redisclient.StringCmd) int64 {
+	value, err := cmd.Int64()
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+// Ensure ConnectionTracker implements connections.Tracker.
+var _ connections.Tracker = (*ConnectionTracker)(nil)
 
 // LockStore 适配 DistributedLock。
 type LockStore struct{ store *Store }

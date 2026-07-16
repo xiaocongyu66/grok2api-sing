@@ -27,12 +27,21 @@ type responseDTO struct {
 	Series      []seriesDTO      `json:"series"`
 	TopModels   []modelUsageDTO  `json:"topModels"`
 	Clients     []clientUsageDTO `json:"clients"`
+	Connections connectionsDTO   `json:"connections"`
 }
 
 type liveRatesDTO struct {
 	RPM           float64 `json:"rpm"`
 	TPM           float64 `json:"tpm"`
 	WindowSeconds int     `json:"windowSeconds"`
+}
+
+// connectionsDTO is live gateway concurrency (not period-scoped).
+type connectionsDTO struct {
+	Active  int64            `json:"active"`
+	Peak    int64            `json:"peak"`
+	Total   int64            `json:"total"`
+	Clients []clientUsageDTO `json:"clients"`
 }
 
 type clientUsageDTO struct {
@@ -152,6 +161,10 @@ func (h *Handler) get(c *gin.Context) {
 	for _, item := range result.Clients {
 		clients = append(clients, clientUsageDTO{Client: item.Client, Label: item.Label, Count: item.Count})
 	}
+	liveClients := make([]clientUsageDTO, 0, len(result.Connections.Clients))
+	for _, item := range result.Connections.Clients {
+		liveClients = append(liveClients, clientUsageDTO{Client: item.Client, Label: item.Label, Count: item.Count})
+	}
 	response.Success(c, http.StatusOK, responseDTO{
 		Period:      string(result.Period),
 		GeneratedAt: result.GeneratedAt,
@@ -171,5 +184,11 @@ func (h *Handler) get(c *gin.Context) {
 		Series:    series,
 		TopModels: topModels,
 		Clients:   clients,
+		Connections: connectionsDTO{
+			Active:  result.Connections.Active,
+			Peak:    result.Connections.Peak,
+			Total:   result.Connections.Total,
+			Clients: liveClients,
+		},
 	})
 }

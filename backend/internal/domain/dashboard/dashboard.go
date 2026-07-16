@@ -38,6 +38,18 @@ type LiveRates struct {
 	WindowSeconds int
 }
 
+// Connections is live gateway concurrency (not period-scoped).
+type Connections struct {
+	// Active is in-flight authenticated /v1 requests right now.
+	Active int64
+	// Peak is the highest Active since process start (or shared Redis peak).
+	Peak int64
+	// Total is cumulative accepted API connections since start.
+	Total int64
+	// Clients is live per-client active counts (e.g. codex:50).
+	Clients []ClientUsage
+}
+
 // ClientUsage is request count for one detected downstream client type in the period.
 type ClientUsage struct {
 	Client string // stable id: codex, claude_code, hermes, …

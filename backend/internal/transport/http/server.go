@@ -18,6 +18,7 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
 	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
@@ -60,6 +61,8 @@ type Dependencies struct {
 	Settings            *settingsapp.Service
 	Egress              *egressapp.Service
 	PromptCacheAffinity *promptcache.Resolver
+	// Connections tracks in-flight authenticated /v1 requests for the dashboard.
+	Connections connections.Tracker
 }
 
 type ReadinessComponent struct {
@@ -157,7 +160,7 @@ func New(deps Dependencies) *gin.Engine {
 			}})
 		})
 	}
-	v1.Use(middleware.ClientAuth(deps.ClientKeys))
+	v1.Use(middleware.ClientAuthWithConnections(deps.ClientKeys, deps.Connections))
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
 	inferenceHandler.SetPromptCacheAffinity(deps.PromptCacheAffinity)
 	inferenceHandler.Register(v1)

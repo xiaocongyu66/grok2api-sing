@@ -7,6 +7,8 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
+	"github.com/chenyme/grok2api/backend/internal/pkg/clientid"
 	"github.com/chenyme/grok2api/backend/internal/shared/response"
 	"github.com/gin-gonic/gin"
 )
@@ -40,6 +42,11 @@ func AdminAuth(service *adminauth.Service) gin.HandlerFunc {
 
 // ClientAuth 校验下游 API Key，并在请求结束时释放并发租约。
 func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
+	return ClientAuthWithConnections(service, nil)
+}
+
+// ClientAuthWithConnections 在鉴权成功后计入全站与按客户端的实时连接（仪表盘用）。
+func ClientAuthWithConnections(service *clientkeyapp.Service, tracker connections.Tracker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, ok := bearerToken(c.GetHeader("Authorization"))
 		if !ok {
@@ -51,9 +58,30 @@ func ClientAuth(service *clientkeyapp.Service) gin.HandlerFunc {
 			return
 		}
 		defer release()
+		if tracker != nil {
+			end := tracker.Begin(detectRequestClient(c))
+			defer end()
+		}
 		c.Set(ClientKey, value)
 		c.Next()
 	}
+}
+
+// detectRequestClient classifies the caller for live connection stats (same rules as audits).
+func detectRequestClient(c *gin.Context) string {
+	userAgent := strings.TrimSpace(c.Request.UserAgent())
+	headers := map[string]string{}
+	for _, name := range []string{
+		"x-claude-code-session-id", "x-codex-window-id", "x-codex-session-id",
+		"x-grok-conv-id", "x-grok-conversation-id",
+		"originator", "x-app", "anthropic-version", "anthropic-beta",
+		"x-stainless-lang", "x-stainless-package-version",
+	} {
+		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
+			headers[strings.ToLower(name)] = value
+		}
+	}
+	return clientid.Detect(userAgent, headers)
 }
 
 func bearerToken(header string) (string, bool) {

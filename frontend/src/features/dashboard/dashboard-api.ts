@@ -37,6 +37,13 @@ export type DashboardDTO = {
   topModels: Array<{ model: string; requests: number; inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningTokens: number; tokens: number; billedCostUsdTicks: number }>;
   /** Downstream client breakdown for the selected period (e.g. codex:60). */
   clients?: Array<{ client: string; label: string; count: number }>;
+  /** Live gateway concurrency (not period-scoped). */
+  connections?: {
+    active: number;
+    peak: number;
+    total: number;
+    clients?: Array<{ client: string; label: string; count: number }>;
+  };
 };
 
 const dashboardSeriesModel = hasShape({ model: isString, tokens: isNumber, billedCostUsdTicks: isNumber });
@@ -66,6 +73,10 @@ const decodeDashboard = createObjectDecoder<DashboardDTO>("dashboard", {
   series: isArrayOf(dashboardSeriesItem),
   topModels: isArrayOf(dashboardModelItem),
   clients: isOptional(isArrayOf(hasShape({ client: isString, label: isString, count: isNumber }))),
+  connections: isOptional(hasShape({
+    active: isNumber, peak: isNumber, total: isNumber,
+    clients: isOptional(isArrayOf(hasShape({ client: isString, label: isString, count: isNumber }))),
+  })),
 });
 
 export type DashboardQuery = {
