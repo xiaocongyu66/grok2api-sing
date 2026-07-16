@@ -156,7 +156,7 @@ func TestParseChatImageDataURIValidatesContent(t *testing.T) {
 
 func TestRemoteChatImageURLBlocksPrivateNetworks(t *testing.T) {
 	for _, value := range []string{"http://example.com/image.png", "https://127.0.0.1/image.png", "https://169.254.169.254/latest/meta-data", "https://[::1]/image.png", "https://[::ffff:127.0.0.1]/image.png"} {
-		if _, _, err := validateRemoteImageURL(context.Background(), value); err == nil {
+		if _, err := validateRemoteImageURL(context.Background(), value); err == nil {
 			t.Fatalf("unsafe image URL accepted: %s", value)
 		}
 	}
