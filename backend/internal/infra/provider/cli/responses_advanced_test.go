@@ -78,6 +78,45 @@ func TestResponsesCustomToolRequestHistoryAndJSONResponse(t *testing.T) {
 	}
 }
 
+func TestResponsesCustomToolGrammarIsDowngraded(t *testing.T) {
+	// Codex Desktop frequently sends custom tools with format.type=grammar.
+	// Grok Build cannot enforce it; the gateway must degrade instead of 400.
+	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+		"model":"public","input":"apply patch",
+		"tools":[{
+			"type":"custom",
+			"name":"apply_patch",
+			"description":"Apply a patch",
+			"format":{"type":"grammar","syntax":"lark","definition":"start: \"*** Begin Patch\" TEXT \"*** End Patch\""}
+		}]
+	}`), "grok-4.5")
+	if err != nil {
+		t.Fatalf("grammar custom tool should degrade, not fail: %v", err)
+	}
+	if compatibility == nil {
+		t.Fatal("custom tool 未启用兼容层")
+	}
+	warnings := compatibility.warningHeader()
+	if !strings.Contains(warnings, "custom_tool_grammar_downgraded") || !strings.Contains(warnings, "custom_tool_emulated") {
+		t.Fatalf("warnings = %q", warnings)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(normalized, &request); err != nil {
+		t.Fatal(err)
+	}
+	tool := request["tools"].([]any)[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "apply_patch" {
+		t.Fatalf("upstream tool = %#v", tool)
+	}
+	description, _ := tool["description"].(string)
+	if !strings.Contains(description, "not enforced") && !strings.Contains(description, "cannot enforce") {
+		t.Fatalf("description should mention grammar downgrade: %q", description)
+	}
+	if _, exists := tool["format"]; exists {
+		t.Fatalf("grammar format must not leak upstream: %#v", tool)
+	}
+}
+
 func TestResponsesCustomToolStreamUsesCustomEvents(t *testing.T) {
 	_, compatibility, err := normalizeResponsesRequest([]byte(`{
 		"model":"public","input":"run",

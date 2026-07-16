@@ -96,7 +96,7 @@ Grok Build `0.2.99` 尚未原生接受 OpenAI 新版 `namespace` 与 `tool_searc
 
 `web_search_preview` 及其版本别名会转换为最小 `web_search` 声明；当前上游会以 `Argument not supported` 拒绝 Codex/OpenAI 新版的 `external_web_access`、`indexed_web_access`、`search_content_types`、`search_context_size`、`user_location` 和 `filters` 等控制字段，因此兼容层会将可安全放宽的已知字段降级为 0.2.99 的最小搜索声明。遇到 `external_web_access: false` 时会移除整个 Web Search 工具，并将显式选择该工具的 `tool_choice` 收敛为 `none`，确保不会把“禁止外网”静默扩大为可联网搜索；这会禁用包括索引搜索在内的全部 Web Search，并通过兼容警告公开该降级。非空 `filters` 或 `allowed_domains` 等无法用更严格子集等价执行的范围约束仍会明确拒绝；其他未知字段同样报错。
 
-OpenAI `custom` 工具会转换为只接受 `input` 字符串的普通函数，并在 JSON/SSE 响应及续轮历史中恢复为 `custom_tool_call`、`custom_tool_call_output` 和 `response.custom_tool_call_input.*` 事件。纯文本 format 可兼容；grammar 无法等价表达，会返回 `unsupported_parameter`。
+OpenAI `custom` 工具会转换为只接受 `input` 字符串的普通函数，并在 JSON/SSE 响应及续轮历史中恢复为 `custom_tool_call`、`custom_tool_call_output` 和 `response.custom_tool_call_input.*` 事件。`format.type=text` 原样兼容；`format.type=grammar`（Codex Desktop 常见）无法在 Grok Build 等价执行受限解码，网关会降级为自由文本 `input` 字符串，并在 Header `X-Grok2API-Compatibility-Warnings` 返回 `custom_tool_grammar_downgraded`（同时带 `custom_tool_emulated`），不会因 grammar 直接 400。
 
 Codex 的可见 `agent_message` 与 `mcp_tool_call_output` 会保留为 developer 文本；`local_shell_call/output` 与 `apply_patch_call/output` 保持结构化续轮协议。不透明或加密的 agent 内容会替换为不含密文的边界消息，`compaction_trigger` 会替换为压缩边界消息，避免静默丢弃或让整轮失败。SSE 兼容层只向下游保留标准 `response.*`、`error` 与 `[DONE]`，过滤上游私有事件，同时保留标准 comment、`id` 和 `retry` 字段。
 
