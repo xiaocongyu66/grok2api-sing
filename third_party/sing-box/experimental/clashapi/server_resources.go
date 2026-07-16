@@ -129,10 +129,13 @@ func (s *Server) downloadZIP(body io.Reader, output string) error {
 		}
 		relPath := filepath.Join(pathElements...)
 		savePath := filepath.Join(outputRoot, relPath)
-		// Ensure the resolved path stays under outputRoot (CodeQL Zip Slip guard).
-		if !strings.HasPrefix(savePath, outputRoot+string(os.PathSeparator)) && savePath != outputRoot {
+		// Ensure the cleaned path stays under outputRoot (Zip Slip guard for CodeQL + runtime).
+		cleanRoot := filepath.Clean(outputRoot) + string(os.PathSeparator)
+		cleanSave := filepath.Clean(savePath)
+		if cleanSave != filepath.Clean(outputRoot) && !strings.HasPrefix(cleanSave+string(os.PathSeparator), cleanRoot) {
 			return E.New("zip entry escapes destination: ", file.Name)
 		}
+		savePath = cleanSave
 		if err = os.MkdirAll(filepath.Dir(savePath), 0o755); err != nil {
 			return err
 		}

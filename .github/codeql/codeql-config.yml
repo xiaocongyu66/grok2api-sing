@@ -1,6 +1,11 @@
 name: "grok2api-sing CodeQL"
 
-# Default security-and-quality pack; source-level suppressions handle protocol false positives
-# (e.g. Trojan SHA224 wire-key derivation is not password storage).
+# Focus analysis on first-party gateway code. Vendored sing-box is large and
+# produces protocol/false-positive noise (Trojan SHA224 wire keys, DNS tooling).
 queries:
   - uses: security-and-quality
+
+paths-ignore:
+  - third_party/**
+  - "**/node_modules/**"
+  - frontend/dist/**

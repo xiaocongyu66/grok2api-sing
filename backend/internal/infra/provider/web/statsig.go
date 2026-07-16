@@ -22,11 +22,10 @@ import (
 )
 
 const (
-	defaultStatsigSignerURL = "https://grok.wodf.de/sign"
-	statsigCacheTTL         = time.Hour
-	statsigCacheMaxEntries  = 4096
-	statsigMetaBodyLimit    = 4 << 20
-	statsigResponseLimit    = 4 << 10
+	statsigCacheTTL        = time.Hour
+	statsigCacheMaxEntries = 4096
+	statsigMetaBodyLimit   = 4 << 20
+	statsigResponseLimit   = 4 << 10
 )
 
 type statsigCacheEntry struct {
@@ -379,16 +378,35 @@ func (a *Adapter) applySignedStatsig(ctx context.Context, request *http.Request,
 		return
 	}
 	value, source, err := a.statsig.Sign(ctx, cfg.BaseURL, cfg.StatsigSignerURL, token, lease, request.Method, request.URL.String())
+	logMethod := sanitizeLogField(request.Method)
+	logPath := sanitizeLogField(request.URL.EscapedPath())
 	if err == nil {
 		request.Header.Set("x-statsig-id", value)
 		if source == "refresh" {
-			a.log().Info("web_statsig_refreshed", "method", request.Method, "path", request.URL.EscapedPath())
+			a.log().Info("web_statsig_refreshed", "method", logMethod, "path", logPath)
 		} else if source == "stale" {
-			a.log().Warn("web_statsig_refresh_failed_using_stale", "method", request.Method, "path", request.URL.EscapedPath())
+			a.log().Warn("web_statsig_refresh_failed_using_stale", "method", logMethod, "path", logPath)
 		}
 		return
 	}
-	a.log().Warn("web_statsig_fetch_failed", "method", request.Method, "path", request.URL.EscapedPath(), "error", err)
+	a.log().Warn("web_statsig_fetch_failed", "method", logMethod, "path", logPath, "error", err)
+}
+
+func sanitizeLogField(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		default:
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}
+	}, value)
 }
 
 // WarmStatsig 只使用一个 Web 账号和一个出口租约预热共享签名，不会逐账号访问上游。

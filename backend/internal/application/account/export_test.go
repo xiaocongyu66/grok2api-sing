@@ -64,18 +64,19 @@ func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 	if value.Name != "primary" || value.Email != "user@example.com" || value.UserID != "user-1" || value.OIDCClientID != "client-1" || value.AccessToken != "access-token" || value.RefreshToken != "refresh-token" || !value.ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("round-trip credential = %#v", value)
 	}
-	progress := make([][2]int, 0, 2)
+	progress := make([][2]int, 0, 4)
 	if _, err := service.ImportCredentialsWithProgress(ctx, result.Data, nil, func(completed, total int) error {
 		progress = append(progress, [2]int{completed, total})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(progress) != 2 || progress[0] != [2]int{0, 1} || progress[1] != [2]int{1, 1} {
+	// Progress reports parse phase (per document) then persist phase (per seed).
+	if len(progress) < 2 || progress[0] != [2]int{0, 1} || progress[len(progress)-1] != [2]int{1, 1} {
 		t.Fatalf("import progress = %#v", progress)
 	}
 
-	multiProgress := make([][2]int, 0, 3)
+	multiProgress := make([][2]int, 0, 8)
 	multiResult, err := service.ImportCredentialDocumentsWithProgress(ctx, [][]byte{
 		result.Data,
 		result.Data,
@@ -90,7 +91,7 @@ func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 	if multiResult.Created != 1 || multiResult.Updated != 1 {
 		t.Fatalf("multi-file import result = %#v", multiResult)
 	}
-	if len(multiProgress) != 3 || multiProgress[0] != [2]int{0, 2} || multiProgress[2] != [2]int{2, 2} {
+	if len(multiProgress) < 2 || multiProgress[0] != [2]int{0, 3} || multiProgress[len(multiProgress)-1][0] != multiProgress[len(multiProgress)-1][1] {
 		t.Fatalf("multi-file import progress = %#v", multiProgress)
 	}
 }

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -89,6 +90,24 @@ func SecurityHeaders() gin.HandlerFunc {
 	}
 }
 
+// sanitizeLogValue strips CR/LF and other control characters that could split log lines.
+func sanitizeLogValue(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		default:
+			if r < 0x20 || r == 0x7f {
+				return -1
+			}
+			return r
+		}
+	}, value)
+}
+
 // AccessLog 记录路径、状态、耗时与调用方元数据，不读取请求或响应正文。
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -116,19 +135,19 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		}
 		clientType := clientid.Detect(userAgent, headers)
 		attrs := []any{
-			"request_id", requestID,
-			"method", c.Request.Method,
-			"path", path,
+			"request_id", sanitizeLogValue(fmt.Sprint(requestID)),
+			"method", sanitizeLogValue(c.Request.Method),
+			"path", sanitizeLogValue(path),
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(startedAt).Milliseconds(),
-			"client_ip", c.ClientIP(),
-			"client_type", clientType,
-			"user_agent", userAgent,
+			"client_ip", sanitizeLogValue(c.ClientIP()),
+			"client_type", sanitizeLogValue(clientType),
+			"user_agent", sanitizeLogValue(userAgent),
 			"bytes_out", c.Writer.Size(),
 		}
 		if keyValue, ok := c.Get(ClientKey); ok {
 			if key, ok := keyValue.(clientkeydomain.Key); ok {
-				attrs = append(attrs, "client_key_id", key.ID, "client_key_name", key.Name, "client_key_prefix", key.Prefix)
+				attrs = append(attrs, "client_key_id", key.ID, "client_key_name", sanitizeLogValue(key.Name), "client_key_prefix", sanitizeLogValue(key.Prefix))
 			}
 		}
 		logger.Info("http_request", attrs...)

@@ -62,7 +62,8 @@ runtimeStore:
     # [必须修改：仅 driver=redis] 填写 Redis 连接信息。
     address: "127.0.0.1:6379"
     username: ""
-    password: ""
+    # [按需修改] Redis 需要密码时填写；留空表示无密码（不是“空密码登录”）。
+    # password: "change-me"
     database: 0
     # [通常不要修改] 同一 Redis 中部署多个实例组时才需要更换。
     keyPrefix: "grok2api:"

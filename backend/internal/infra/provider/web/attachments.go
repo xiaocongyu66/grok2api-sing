@@ -84,9 +84,20 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 	if err != nil {
 		return provider.ImageInput{}, err
 	}
+	// Rebuild request URL from validated components only (no userinfo / odd ports).
+	// Dial is forced to allowedIPs so DNS rebinding cannot retarget the TCP connection.
+	safeURL := &url.URL{
+		Scheme:   "https",
+		Host:     parsed.Hostname(),
+		Path:     parsed.EscapedPath(),
+		RawQuery: parsed.RawQuery,
+	}
+	if safeURL.Path == "" {
+		safeURL.Path = "/"
+	}
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsed.String(), nil)
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, safeURL.String(), nil)
 	if err != nil {
 		return provider.ImageInput{}, err
 	}
@@ -108,6 +119,7 @@ func (a *Adapter) loadChatImage(ctx context.Context, lease *egress.Lease, input 
 			DialContext:           pinnedPublicDialContext(allowedIPs),
 		},
 	}
+	// codeql[go/request-forgery]: host/path validated as public HTTPS; dial pinned; redirects disabled; no cookies.
 	response, err := client.Do(request)
 	if err != nil {
 		return provider.ImageInput{}, fmt.Errorf("下载对话图片: %w", err)
