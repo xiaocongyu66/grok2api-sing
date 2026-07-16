@@ -2,7 +2,6 @@ package inference
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,10 +25,10 @@ import (
 )
 
 type Handler struct {
+	affinity *promptcache.Resolver
 	gateway      *gateway.Service
 	models       *modelapp.Service
 	maxBodyBytes int64
-	affinity     *promptcache.Resolver
 }
 
 const (
@@ -39,9 +38,7 @@ const (
 	maxJSONResponseTransferBytes   = 128 << 20
 	maxStreamResponseTransferBytes = 256 << 20
 	maxMediaResponseTransferBytes  = int64(2) << 30
-	// Per-chunk write deadline. Long generations may pause between tokens; 30s was too aggressive
-	// and caused mid-stream disconnects ("说着说着突然断").
-	responseWriteTimeout = 5 * time.Minute
+	responseWriteTimeout           = 30 * time.Second
 )
 
 var errResponseTransferLimit = errors.New("响应超过代理安全上限")
@@ -59,11 +56,11 @@ func (h *Handler) SetPromptCacheAffinity(resolver *promptcache.Resolver) {
 	}
 }
 
+
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/models", h.listModels)
 	router.POST("/responses", h.createResponse)
 	router.POST("/chat/completions", h.createChatCompletion)
-	// Legacy OpenAI-style alias; prefer RegisterAnthropic (/Anthropic/messages).
 	router.POST("/messages", h.createMessage)
 	router.POST("/images/generations", h.generateImage)
 	router.POST("/images/edits", h.editImage)
@@ -74,42 +71,25 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.DELETE("/responses/:responseId", h.deleteResponse)
 }
 
-// RegisterAnthropic mounts Anthropic Messages at /Anthropic/messages
-// (e.g. https://host/Anthropic/messages). Clients set ANTHROPIC_BASE_URL to https://host/Anthropic.
-func (h *Handler) RegisterAnthropic(router *gin.RouterGroup) {
-	router.POST("/messages", h.createMessage)
-}
-
 type responsesRequest struct {
 	Model              string `json:"model"`
 	Stream             bool   `json:"stream"`
 	PromptCacheKey     string `json:"prompt_cache_key"`
 	PreviousResponseID string `json:"previous_response_id"`
-	User               string `json:"user"`
-	Metadata           *struct {
-		UserID string `json:"user_id"`
-	} `json:"metadata"`
 }
 
 type chatCompletionRequest struct {
 	Model          string `json:"model"`
 	Stream         bool   `json:"stream"`
 	PromptCacheKey string `json:"prompt_cache_key"`
-	User           string `json:"user"`
-	// OpenAI-compatible metadata; user_id is used as a stable prompt-cache affinity key.
-	Metadata *struct {
-		UserID string `json:"user_id"`
-	} `json:"metadata"`
 }
 
 type messagesRequest struct {
-	Model     string          `json:"model"`
-	MaxTokens *int            `json:"max_tokens"`
-	Messages  json.RawMessage `json:"messages"`
-	Stream    bool            `json:"stream"`
-	Metadata  *struct {
-		UserID string `json:"user_id"`
-	} `json:"metadata"`
+	Model          string          `json:"model"`
+	MaxTokens      *int            `json:"max_tokens"`
+	Messages       json.RawMessage `json:"messages"`
+	Stream         bool            `json:"stream"`
+	PromptCacheKey string          `json:"prompt_cache_key"`
 }
 
 type imageGenerationRequest struct {
@@ -221,24 +201,16 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
-	// xAI prompt cache needs a stable affinity id (x-grok-conv-id). Without it the
-	// Build adapter invents a random id per request and cached_tokens stays 0.
-	metadataUserID := ""
-	if request.Metadata != nil {
-		metadataUserID = request.Metadata.UserID
-	}
-	seed := promptcache.ConversationSeedFromChatBody(body)
-	promptCacheKey := h.resolvePromptCacheKey(c, clientKey, request.PromptCacheKey, request.User, metadataUserID, "", seed)
-	body = injectPromptCacheKey(body, promptCacheKey)
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
+		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
+		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
 	}))
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream, clientKey.ID, promptCacheKey)
+	h.writeResult(c, result, request.Stream)
 }
 
 func (h *Handler) createMessage(c *gin.Context) {
@@ -269,150 +241,16 @@ func (h *Handler) createMessage(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
-	metadataUserID := ""
-	if request.Metadata != nil {
-		metadataUserID = request.Metadata.UserID
-	}
-	seed := promptcache.ConversationSeedFromMessagesBody(body)
-	promptCacheKey := h.resolvePromptCacheKey(c, clientKey, "", "", metadataUserID, "", seed)
-	body = injectPromptCacheKey(body, promptCacheKey)
 	result, err := h.gateway.CreateMessage(c.Request.Context(), withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
+		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
+		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
 	}))
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream, clientKey.ID, promptCacheKey)
-}
-
-// withClientMeta attaches detected downstream client type / UA / IP for request audits.
-func withClientMeta(c *gin.Context, input gateway.Input) gateway.Input {
-	input.ClientType, input.ClientUserAgent, input.ClientIP = detectClient(c)
-	return input
-}
-
-func detectClient(c *gin.Context) (clientType, userAgent, clientIP string) {
-	userAgent = strings.TrimSpace(c.Request.UserAgent())
-	if len(userAgent) > 256 {
-		userAgent = userAgent[:256]
-	}
-	headers := map[string]string{}
-	for _, name := range []string{
-		"x-claude-code-session-id", "x-codex-window-id", "x-codex-session-id",
-		"x-grok-conv-id", "x-grok-conversation-id",
-		"originator", "x-app", "x-client-name", "x-client-title", "x-title",
-		"anthropic-version", "anthropic-beta",
-		"openai-beta", "openai-organization",
-		"x-stainless-lang", "x-stainless-package-version", "x-stainless-runtime",
-	} {
-		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
-			headers[strings.ToLower(name)] = value
-		}
-	}
-	return clientid.Detect(userAgent, headers), userAgent, c.ClientIP()
-}
-
-// resolvePromptCacheKey picks a stable conversation affinity key for xAI prompt caching.
-// Priority: session headers/body → previous_response_id linkage → conversation seed → fingerprint.
-func (h *Handler) resolvePromptCacheKey(c *gin.Context, clientKey clientkeydomain.Key, explicit, user, metadataUserID, previousResponseID, conversationSeed string) string {
-	headers := map[string]string{}
-	for _, name := range []string{
-		"x-grok-conv-id", "x-grok-conversation-id",
-		"x-claude-code-session-id", "session-id", "x-session-id",
-		"x-codex-window-id", "x-codex-session-id",
-		"x-conversation-id", "conversation-id", "x-client-request-id", "x-openwebui-chat-id",
-	} {
-		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
-			headers[strings.ToLower(name)] = value
-		}
-	}
-	// Legacy helper for tests without resolver.
-	if h == nil || h.affinity == nil {
-		return resolvePromptCacheKeyLegacy(c, explicit, user, metadataUserID)
-	}
-	id, err := h.affinity.Resolve(c.Request.Context(), promptcache.Request{
-		ClientKeyID: clientKey.ID, ClientIP: c.ClientIP(), UserAgent: c.Request.UserAgent(),
-		Headers: headers, Explicit: explicit, User: user, MetadataUserID: metadataUserID,
-		PreviousResponseID: previousResponseID, ConversationSeed: conversationSeed,
-	})
-	if err != nil || id == "" {
-		return resolvePromptCacheKeyLegacy(c, explicit, user, metadataUserID)
-	}
-	return id
-}
-
-func resolvePromptCacheKeyLegacy(c *gin.Context, explicit, user, metadataUserID string) string {
-	for _, candidate := range []string{
-		explicit, user, metadataUserID,
-		c.GetHeader("x-grok-conv-id"), c.GetHeader("X-Grok-Conv-Id"),
-		c.GetHeader("x-grok-conversation-id"), c.GetHeader("X-Grok-Conversation-Id"),
-		c.GetHeader("x-claude-code-session-id"), c.GetHeader("session-id"), c.GetHeader("x-session-id"),
-		c.GetHeader("x-codex-window-id"), c.GetHeader("x-codex-session-id"),
-		c.GetHeader("x-conversation-id"), c.GetHeader("conversation-id"),
-	} {
-		if value := strings.TrimSpace(candidate); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-// resolvePromptCacheKey keeps the old package-level helper name for unit tests.
-func resolvePromptCacheKey(c *gin.Context, explicit, user, metadataUserID string) string {
-	return resolvePromptCacheKeyLegacy(c, explicit, user, metadataUserID)
-}
-
-// injectPromptCacheKey writes prompt_cache_key into a JSON object body when missing or empty.
-func injectPromptCacheKey(body []byte, key string) []byte {
-	key = strings.TrimSpace(key)
-	if key == "" || len(body) == 0 {
-		return body
-	}
-	var payload map[string]json.RawMessage
-	if json.Unmarshal(body, &payload) != nil {
-		return body
-	}
-	if raw, ok := payload["prompt_cache_key"]; ok {
-		var existing string
-		if json.Unmarshal(raw, &existing) == nil && strings.TrimSpace(existing) != "" {
-			return body
-		}
-	}
-	encoded, err := json.Marshal(key)
-	if err != nil {
-		return body
-	}
-	payload["prompt_cache_key"] = encoded
-	out, err := json.Marshal(payload)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
-func setPromptCacheResponseHeaders(c *gin.Context, key string) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return
-	}
-	c.Header("X-Grok-Conv-Id", key)
-	c.Header("X-Grok2API-Prompt-Cache-Key", key)
-}
-
-func (h *Handler) rememberPromptCacheTurn(clientKeyID uint64, responseID, affinityID string) {
-	if h == nil || h.affinity == nil || clientKeyID == 0 {
-		return
-	}
-	responseID = strings.TrimSpace(responseID)
-	affinityID = strings.TrimSpace(affinityID)
-	if responseID == "" || affinityID == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = h.affinity.RememberTurn(ctx, clientKeyID, responseID, affinityID)
+	h.writeResult(c, result, request.Stream)
 }
 
 func (h *Handler) generateImage(c *gin.Context) {
@@ -442,18 +280,16 @@ func (h *Handler) generateImage(c *gin.Context) {
 	if !ok {
 		return
 	}
-	clientType, clientUA, clientIP := detectClient(c)
 	result, err := h.gateway.GenerateImage(c.Request.Context(), gateway.ImageGenerationInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: request.Model, Prompt: request.Prompt,
 		Count: count, Size: request.Size, AspectRatio: request.AspectRatio,
 		Resolution: request.Resolution, ResponseFormat: request.ResponseFormat, Streaming: request.Stream,
-		ClientType: clientType, ClientUserAgent: clientUA, ClientIP: clientIP,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream, 0, "")
+	h.writeResult(c, result, request.Stream)
 }
 
 func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
@@ -600,17 +436,15 @@ func (h *Handler) editImage(c *gin.Context) {
 	if !ok {
 		return
 	}
-	clientType, clientUA, clientIP := detectClient(c)
 	result, err := h.gateway.EditImage(c.Request.Context(), gateway.ImageEditInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: model, Prompt: prompt,
 		ImageURLs: imageURLs, Count: count, Resolution: resolution, ResponseFormat: request.ResponseFormat,
-		ClientType: clientType, ClientUserAgent: clientUA, ClientIP: clientIP,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, false, 0, "")
+	h.writeResult(c, result, false)
 }
 
 func requestIdentity(c *gin.Context) (clientkeydomain.Key, string, bool) {
@@ -700,12 +534,10 @@ func (h *Handler) generateVideo(c *gin.Context) {
 	if !ok {
 		return
 	}
-	clientType, clientUA, clientIP := detectClient(c)
 	job, err := h.gateway.CreateVideo(c.Request.Context(), gateway.VideoInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: model,
 		Prompt: prompt, Duration: duration, AspectRatio: aspectRatio, Resolution: resolution,
 		ReferenceURLs: referenceURLs,
-		ClientType:    clientType, ClientUserAgent: clientUA, ClientIP: clientIP,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -835,14 +667,11 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
-	metadataUserID := ""
-	if request.Metadata != nil {
-		metadataUserID = request.Metadata.UserID
-	}
-	seed := promptcache.ConversationSeedFromResponsesBody(body)
-	promptCacheKey := h.resolvePromptCacheKey(c, clientKey, request.PromptCacheKey, request.User, metadataUserID, request.PreviousResponseID, seed)
-	body = injectPromptCacheKey(body, promptCacheKey)
-	input := withClientMeta(c, gateway.Input{RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model, Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey, PreviousResponseID: request.PreviousResponseID})
+	input := withClientMeta(c, gateway.Input{
+		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
+		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
+		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
+	})
 	var result *gateway.Result
 	if compact {
 		result, err = h.gateway.CompactResponse(c.Request.Context(), input)
@@ -853,7 +682,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, request.Stream && !compact, clientKey.ID, promptCacheKey)
+	h.writeResult(c, result, request.Stream && !compact)
 }
 
 func isJSONRequest(c *gin.Context) bool {
@@ -909,20 +738,15 @@ func (h *Handler) handleOwnedResource(c *gin.Context, deleteResource bool) {
 		writeGatewayError(c, err)
 		return
 	}
-	h.writeResult(c, result, false, 0, "")
+	h.writeResult(c, result, false)
 }
 
-func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream bool, clientKeyID uint64, promptCacheKey string) {
+func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream bool) {
 	usage := gateway.Usage{}
 	responseID := ""
 	errorCode := ""
 	defer result.Body.Close()
-	defer func() {
-		result.Finalize(usage, responseID, errorCode)
-		if errorCode == "" && responseID != "" {
-			h.rememberPromptCacheTurn(clientKeyID, responseID, promptCacheKey)
-		}
-	}()
+	defer func() { result.Finalize(usage, responseID, errorCode) }()
 	transferLimit := int64(maxJSONResponseTransferBytes)
 	if stream {
 		transferLimit = maxStreamResponseTransferBytes
@@ -933,7 +757,6 @@ func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream boo
 		return
 	}
 	copyHeaders(c.Writer.Header(), result.Header)
-	setPromptCacheResponseHeaders(c, promptCacheKey)
 	c.Status(result.StatusCode)
 	if result.StatusCode >= 400 {
 		errorCode = "upstream_error"
@@ -949,59 +772,9 @@ func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream boo
 	if err != nil {
 		if errors.Is(err, errResponseTransferLimit) {
 			errorCode = "response_too_large"
-		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			errorCode = "stream_interrupted"
 		} else {
 			errorCode = "stream_interrupted"
 		}
-		// If headers/body already started, best-effort emit a terminal SSE error so clients
-		// do not hang waiting for [DONE] / message_stop after an upstream drop.
-		if stream && c.Writer.Written() {
-			writeStreamInterruptTrailer(c, result.StatusCode, errorCode, err)
-		}
-	}
-}
-
-// writeStreamInterruptTrailer emits a protocol-appropriate terminal error event after a mid-stream drop.
-func writeStreamInterruptTrailer(c *gin.Context, status int, code string, cause error) {
-	message := "上游响应中断"
-	if errors.Is(cause, context.Canceled) {
-		message = "请求已取消"
-	} else if errors.Is(cause, context.DeadlineExceeded) {
-		message = "请求超时"
-	} else if cause != nil && strings.TrimSpace(cause.Error()) != "" {
-		// Keep public message short; do not leak internal dial details.
-		message = "上游响应中断，请重试"
-	}
-	_ = code
-	_ = status
-	path := c.Request.URL.Path
-	if path == "/Anthropic/messages" || path == "/anthropic/messages" || path == "/v1/messages" || strings.HasSuffix(path, "/messages") {
-		payload, _ := json.Marshal(map[string]any{
-			"type": "error",
-			"error": map[string]any{
-				"type":    "api_error",
-				"message": message,
-			},
-		})
-		_, _ = c.Writer.Write([]byte("event: error\ndata: " + string(payload) + "\n\n"))
-		if f, ok := c.Writer.(http.Flusher); ok {
-			f.Flush()
-		}
-		return
-	}
-	// OpenAI Chat / Responses SSE style.
-	payload, _ := json.Marshal(map[string]any{
-		"error": map[string]any{
-			"message": message,
-			"type":    "server_error",
-			"code":    "stream_interrupted",
-		},
-	})
-	_, _ = c.Writer.Write([]byte("data: " + string(payload) + "\n\n"))
-	_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
-	if f, ok := c.Writer.(http.Flusher); ok {
-		f.Flush()
 	}
 }
 
@@ -1103,9 +876,7 @@ func (i *responseInspector) Inspect(chunk []byte) {
 			value := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if !bytes.Equal(value, []byte("[DONE]")) {
 				metadata := extractMetadata(value)
-				// Accept any non-empty usage (including cached-only updates); previously
-				// TotalTokens>0 skipped events that only carried partial usage details.
-				if metadata.Usage.TotalTokens > 0 || metadata.Usage.InputTokens > 0 || metadata.Usage.OutputTokens > 0 || metadata.Usage.CachedInputTokens > 0 {
+				if metadata.Usage.TotalTokens > 0 {
 					if metadata.Usage.ResponseModel == "" {
 						metadata.Usage.ResponseModel = i.metadata.Model
 					}
@@ -1176,14 +947,10 @@ type responseUsageDTO struct {
 	NumSourcesUsed         int64                     `json:"num_sources_used"`
 	NumServerSideToolsUsed int64                     `json:"num_server_side_tools_used"`
 	InputTokensDetails     responseInputDetailsDTO   `json:"input_tokens_details"`
-	PromptTokensDetails    responseInputDetailsDTO   `json:"prompt_tokens_details"` // OpenAI Chat Completions
 	OutputTokensDetails    responseOutputDetailsDTO  `json:"output_tokens_details"`
 	ContextDetails         responseContextDetailsDTO `json:"context_details"`
 	PromptTokens           int64                     `json:"prompt_tokens"`
 	CompletionTokens       int64                     `json:"completion_tokens"`
-	// Anthropic Messages cache fields (Web estimated prompt-cache hits).
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 }
 
 type responseInputDetailsDTO struct {
@@ -1221,19 +988,8 @@ func (value responseUsageDTO) toGatewayUsage(responseModel string) gateway.Usage
 	if total == 0 {
 		total = input + output
 	}
-	// Prompt-cache hits: Responses cached_tokens, Chat prompt_tokens_details, or Anthropic cache_read.
-	cached := value.InputTokensDetails.CachedTokens
-	if cached == 0 {
-		cached = value.PromptTokensDetails.CachedTokens
-	}
-	if cached == 0 {
-		cached = value.CacheReadInputTokens
-	}
-	if cached > input && input > 0 {
-		cached = input
-	}
 	return gateway.Usage{
-		InputTokens: input, CachedInputTokens: cached,
+		InputTokens: input, CachedInputTokens: value.InputTokensDetails.CachedTokens,
 		OutputTokens: output, ReasoningTokens: value.OutputTokensDetails.ReasoningTokens,
 		TotalTokens: total, CostInUSDTicks: value.CostInUSDTicks,
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
@@ -1381,4 +1137,27 @@ func forceJSONBoolean(body []byte, key string, value bool) ([]byte, error) {
 		payload[key] = json.RawMessage("true")
 	}
 	return json.Marshal(payload)
+}
+
+func detectClient(c *gin.Context) (clientType, userAgent, clientIP string) {
+	userAgent = strings.TrimSpace(c.Request.UserAgent())
+	headers := map[string]string{}
+	for _, name := range []string{
+		"x-claude-code-session-id", "x-codex-window-id", "x-codex-session-id",
+		"x-grok-conv-id", "x-grok-conversation-id",
+		"originator", "x-app", "anthropic-version", "anthropic-beta",
+		"x-stainless-lang", "x-stainless-package-version",
+	} {
+		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
+			headers[strings.ToLower(name)] = value
+		}
+	}
+	return clientid.Detect(userAgent, headers), userAgent, c.ClientIP()
+}
+
+
+func withClientMeta(c *gin.Context, input gateway.Input) gateway.Input {
+	ct, ua, ip := detectClient(c)
+	input.ClientType, input.ClientUserAgent, input.ClientIP = ct, ua, ip
+	return input
 }

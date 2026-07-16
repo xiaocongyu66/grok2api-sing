@@ -18,8 +18,6 @@ import (
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	modelapp "github.com/chenyme/grok2api/backend/internal/application/model"
 	settingsapp "github.com/chenyme/grok2api/backend/internal/application/settings"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
-	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	accounthttp "github.com/chenyme/grok2api/backend/internal/transport/http/account"
 	adminauthhttp "github.com/chenyme/grok2api/backend/internal/transport/http/adminauth"
 	audithttp "github.com/chenyme/grok2api/backend/internal/transport/http/audit"
@@ -28,6 +26,8 @@ import (
 	egresshttp "github.com/chenyme/grok2api/backend/internal/transport/http/egress"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/inference"
 	mediahttp "github.com/chenyme/grok2api/backend/internal/transport/http/media"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
+	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	modelhttp "github.com/chenyme/grok2api/backend/internal/transport/http/model"
 	settingshttp "github.com/chenyme/grok2api/backend/internal/transport/http/settings"
@@ -41,28 +41,28 @@ type Dependencies struct {
 	Logger             *slog.Logger
 	RequestTimeout     time.Duration
 	MaxBodyBytes       int64
+	ConcurrencyGate    *middleware.ConcurrencyGate
+	PromptCacheAffinity *promptcache.Resolver
+	Connections         connections.Tracker
 	SecureCookies      bool
 	SwaggerEnabled     bool
 	PublicAPIBaseURL   string
 	FrontendStaticPath string
 	// Readiness 返回可观测的分层就绪状态。Ready 仅为旧调用方保留。
-	Readiness           func(context.Context) ReadinessSnapshot
-	Ready               func(context.Context) bool
-	TrafficReady        func() bool
-	AdminAuth           *adminauthapp.Service
-	Accounts            *accountapp.Service
-	AccountSync         *accountsyncapp.Service
-	Models              *modelapp.Service
-	ClientKeys          *clientkeyapp.Service
-	Audits              *auditapp.Service
-	Dashboard           *dashboardapp.Service
-	Gateway             *gateway.Service
-	Media               *mediaapp.Service
-	Settings            *settingsapp.Service
-	Egress              *egressapp.Service
-	PromptCacheAffinity *promptcache.Resolver
-	// Connections tracks in-flight authenticated /v1 requests for the dashboard.
-	Connections connections.Tracker
+	Readiness    func(context.Context) ReadinessSnapshot
+	Ready        func(context.Context) bool
+	TrafficReady func() bool
+	AdminAuth    *adminauthapp.Service
+	Accounts     *accountapp.Service
+	AccountSync  *accountsyncapp.Service
+	Models       *modelapp.Service
+	ClientKeys   *clientkeyapp.Service
+	Audits       *auditapp.Service
+	Dashboard    *dashboardapp.Service
+	Gateway      *gateway.Service
+	Media        *mediaapp.Service
+	Settings     *settingsapp.Service
+	Egress       *egressapp.Service
 }
 
 type ReadinessComponent struct {
@@ -105,6 +105,9 @@ type ReadinessSnapshot struct {
 
 // New 创建完整 HTTP 路由并明确区分公共、管理员和客户端鉴权边界。
 func New(deps Dependencies) *gin.Engine {
+	if deps.ConcurrencyGate == nil {
+		panic("httpserver: ConcurrencyGate 不能为空")
+	}
 	gin.SetMode(gin.ReleaseMode)
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
@@ -131,7 +134,8 @@ func New(deps Dependencies) *gin.Engine {
 	if deps.SwaggerEnabled {
 		router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
-	mediahttp.NewHandler(deps.Media).RegisterPublic(router)
+	mediaHandler := mediahttp.NewHandler(deps.Media)
+	mediaHandler.RegisterPublic(router)
 
 	adminRoot := router.Group("/api/admin/v1")
 	authHandler := adminauthhttp.NewHandler(deps.AdminAuth, deps.SecureCookies)
@@ -144,34 +148,33 @@ func New(deps Dependencies) *gin.Engine {
 	clientkeyhttp.NewHandler(deps.ClientKeys).Register(adminProtected)
 	audithttp.NewHandler(deps.Audits).Register(adminProtected)
 	dashboardhttp.NewHandler(deps.Dashboard).Register(adminProtected)
+	mediaHandler.RegisterAdmin(adminProtected)
 	settingshttp.NewHandler(deps.Settings).Register(adminProtected)
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
-	systemhttp.NewHandler(deps.PublicAPIBaseURL).Register(adminProtected)
-
-	trafficGate := func(c *gin.Context) {
-		if deps.TrafficReady == nil || deps.TrafficReady() {
-			c.Next()
-			return
+	systemhttp.NewHandler(func() string {
+		if deps.Settings != nil {
+			return deps.Settings.PublicAPIBaseURL()
 		}
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-			"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
-		}})
-	}
+		return deps.PublicAPIBaseURL
+	}).Register(adminProtected)
 
 	v1 := router.Group("/v1")
-	v1.Use(trafficGate)
+	v1.Use(deps.ConcurrencyGate.Middleware())
+	if deps.TrafficReady != nil {
+		v1.Use(func(c *gin.Context) {
+			if deps.TrafficReady() {
+				c.Next()
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+				"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
+			}})
+		})
+	}
 	v1.Use(middleware.ClientAuthWithConnections(deps.ClientKeys, deps.Connections))
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
-	inferenceHandler.SetPromptCacheAffinity(deps.PromptCacheAffinity)
-	inferenceHandler.Register(v1)
-
-	// Anthropic-compatible base path: {origin}/Anthropic/messages
-	// Claude Code / SDK: ANTHROPIC_BASE_URL=https://host/Anthropic
-	anthropic := router.Group("/Anthropic")
-	anthropic.Use(trafficGate)
-	anthropic.Use(middleware.ClientAuthWithConnections(deps.ClientKeys, deps.Connections))
-	inferenceHandler.RegisterAnthropic(anthropic)
-
+		inferenceHandler.SetPromptCacheAffinity(deps.PromptCacheAffinity)
+		inferenceHandler.Register(v1)
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router
 }

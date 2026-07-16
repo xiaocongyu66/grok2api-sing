@@ -128,8 +128,8 @@ pnpm dev
 
 1. 使用 `bootstrapAdmin` 配置的管理员登录。
 2. 在“上游账号”中接入 Grok Build、Grok Web 或 Grok Console 账号。
-3. 默认**不会**主动向 xAI 拉取余额/额度（`provider.proactiveUpstreamSync` 全关，行为对齐 CLIProxy：仅真实推理 + token 临近过期刷新）。
-4. 在“模型管理”中确认对外模型名称与启用状态（如需导入后自动同步模型目录，可打开 `modelCatalogCatchup`）。
+3. 等待本次额度和模型能力同步完成。
+4. 在“模型管理”中确认对外模型名称与启用状态。
 5. 在“客户端密钥”中创建 `g2a_` API Key。
 6. 使用该密钥调用 `/v1/*`。
 
@@ -145,7 +145,7 @@ pnpm dev
 
 Grok Build OAuth 支持按需续期。Grok Web 与 Grok Console 的 SSO 不可自动续期，凭据失效后账号会退出可用号池并等待重新授权。
 
-Grok Web 与 Grok Console 均支持账号列表 JSON，也支持每行一个 Token 的快速导入。默认关闭主动 `/billing` 与 `/rest/rate-limits` 同步；账号是否可用由推理响应与上游错误码驱动。若需要旧版「导入后补齐额度/模型」行为，在 `config.yaml` 中启用 `provider.proactiveUpstreamSync` 对应开关。
+Grok Web 与 Grok Console 均支持账号列表 JSON，也支持每行一个 Token 的快速导入。账号接入接口会等待本批账号的首次额度与模型能力同步完成后再返回结果。
 
 管理端可复用 Web 账号的同一份 SSO 创建或更新对应的 Console 账号；同步按 Console 身份键幂等执行，不会改变已有 Web/Build 关联。
 
@@ -205,7 +205,7 @@ Authorization: Bearer g2a_xxx_xxx
 | `GET` | `/v1/responses/{id}` | 查询 Response |
 | `DELETE` | `/v1/responses/{id}` | 删除 Response |
 | `POST` | `/v1/chat/completions` | Chat Completions JSON / SSE |
-| `POST` | `/Anthropic/messages` | Anthropic Messages JSON / SSE |
+| `POST` | `/v1/messages` | Anthropic Messages JSON / SSE |
 | `POST` | `/v1/images/generations` | 图片生成 |
 | `POST` | `/v1/images/edits` | 图片编辑 |
 | `GET` | `/v1/media/images/{id}` | 公开归档图片 |
@@ -255,7 +255,7 @@ curl http://127.0.0.1:8000/v1/responses \
 | 本地或单实例 | SQLite | Memory | 本地目录 |
 | 多实例 | PostgreSQL | Redis | 共享卷或实例亲和 |
 
-可热加载的 Provider（包括 Console 上游地址与 User-Agent）、批量任务并发、路由、媒体容量、审计和代理参数统一在管理端 `/settings` 修改，不需要直接编辑数据库。导入同步、账号转换、数据同步和凭据刷新默认并发均为 `25`，可分别限制为 `1–50`，并支持随机启动延迟；多实例使用 Redis 时，分类上限和总上限均在集群范围内生效。
+Provider（包括 Console 上游地址与 User-Agent）、服务容量、批量任务并发、路由、媒体、审计和代理参数统一在管理端 `/settings` 修改，不需要直接编辑数据库；除页面明确标记“重启生效”的字段外均会热加载。导入同步、账号转换、数据同步和凭据刷新默认并发均为 `25`，可分别限制为 `1–50`，并支持随机启动延迟；多实例使用 Redis 时，分类上限和总上限均在集群范围内生效。
 
 ## 生产部署
 
@@ -292,5 +292,3 @@ pnpm build
 
 - [后端说明](./backend/README.md)
 - [前端说明](./frontend/README.md)
-- [Provider 架构与维护边界](./backend/docs/PROVIDER_ARCHITECTURE.md)
-- [API 与协议兼容范围](./backend/docs/RESPONSES_COMPATIBILITY.md)

@@ -9,29 +9,13 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 )
 
-type egressAffinityContextKey struct{}
-
-// WithEgressAffinity attaches a soft sticky key used when selecting among equally loaded proxies.
-func WithEgressAffinity(ctx context.Context, affinity string) context.Context {
-	if affinity == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, egressAffinityContextKey{}, affinity)
-}
-
-func egressAffinityFrom(ctx context.Context) string {
-	value, _ := ctx.Value(egressAffinityContextKey{}).(string)
-	return value
-}
-
 type egressTransport struct {
 	manager  *infraegress.Manager
 	fallback http.RoundTripper
 }
 
 func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	affinity := egressAffinityFrom(request.Context())
-	lease, configured, err := t.manager.AcquireIfConfigured(request.Context(), domainegress.ScopeBuild, affinity)
+	lease, configured, err := t.manager.AcquireIfConfigured(request.Context(), domainegress.ScopeBuild, "")
 	if err != nil {
 		return nil, err
 	}

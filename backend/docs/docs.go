@@ -238,7 +238,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/Anthropic/messages": {
+        "/v1/messages": {
             "post": {
                 "security": [
                     {

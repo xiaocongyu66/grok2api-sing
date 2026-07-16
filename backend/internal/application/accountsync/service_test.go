@@ -115,34 +115,10 @@ func (s *modelStub) counts() (int, int) {
 	return s.checks, s.syncs
 }
 
-func enableProactiveUpstreamSync(service *Service) {
-	service.SetUpstreamSyncPolicy(accountapp.UpstreamSyncPolicy{
-		Billing:             true,
-		WebQuota:            true,
-		ModelCatalogCatchup: true,
-	})
-}
-
-func TestSyncAccountDefaultPolicySkipsUpstream(t *testing.T) {
-	billing := &billingStub{}
-	quota := &quotaStub{}
-	models := &modelStub{}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, quota, models)
-	if err := service.syncAccount(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	billingChecks, billingSyncs := billing.counts()
-	modelChecks, modelSyncs := models.counts()
-	if billingChecks != 0 || billingSyncs != 0 || modelChecks != 0 || modelSyncs != 0 || quota.checks != 0 || quota.syncs != 0 {
-		t.Fatalf("billing = %d/%d, models = %d/%d, quota = %d/%d", billingChecks, billingSyncs, modelChecks, modelSyncs, quota.checks, quota.syncs)
-	}
-}
-
 func TestSyncAccountSkipsExistingSnapshots(t *testing.T) {
 	billing := &billingStub{hasSnapshot: true}
 	models := &modelStub{hasSnapshot: true}
 	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
-	enableProactiveUpstreamSync(service)
 
 	if err := service.syncAccount(context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -159,7 +135,6 @@ func TestSyncAccountFetchesOnlyMissingSnapshots(t *testing.T) {
 	billing := &billingStub{hasSnapshot: true}
 	models := &modelStub{}
 	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
-	enableProactiveUpstreamSync(service)
 
 	if err := service.syncAccount(context.Background(), 7); err != nil {
 		t.Fatal(err)
@@ -177,7 +152,6 @@ func TestSyncAccountUsesQuotaForConsoleProvider(t *testing.T) {
 	quota := &quotaStub{}
 	models := &modelStub{hasSnapshot: true}
 	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderConsole}, billing, quota, models)
-	enableProactiveUpstreamSync(service)
 
 	if err := service.syncAccount(context.Background(), 9); err != nil {
 		t.Fatal(err)
@@ -195,7 +169,6 @@ func TestSyncAccountUsesDeclaredQuotaPolicyInsteadOfProviderName(t *testing.T) {
 	models := &modelStub{hasSnapshot: true}
 	reader := accountReaderStub{provider: accountdomain.ProviderBuild, quota: provider.QuotaRemoteWindow}
 	service := NewService(slog.Default(), reader, billing, quota, models)
-	enableProactiveUpstreamSync(service)
 
 	if err := service.syncAccount(context.Background(), 10); err != nil {
 		t.Fatal(err)
@@ -210,7 +183,6 @@ func TestSyncDeduplicatesAccountsAndWaitsForCompletion(t *testing.T) {
 	billing := &billingStub{}
 	models := &modelStub{}
 	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
-	enableProactiveUpstreamSync(service)
 	result := service.Sync(context.Background(), 1, 1, 2, 0)
 	if result.Succeeded != 2 || result.Failed != 0 {
 		t.Fatalf("result = %#v", result)
@@ -226,7 +198,6 @@ func TestSyncStreamStartsBeforeImportCompletesAndDeduplicates(t *testing.T) {
 	billing := &billingStub{}
 	models := &modelStub{}
 	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
-	enableProactiveUpstreamSync(service)
 	service.UpdateConcurrency(10)
 	input := make(chan uint64)
 	done := make(chan Result, 1)
@@ -260,7 +231,6 @@ func TestSyncStreamStartsBeforeImportCompletesAndDeduplicates(t *testing.T) {
 
 func TestSyncStreamObservedReportsDeduplicatedCompletion(t *testing.T) {
 	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, &billingStub{}, nil, &modelStub{})
-	enableProactiveUpstreamSync(service)
 	input := make(chan uint64, 3)
 	input <- 1
 	input <- 1
@@ -284,9 +254,7 @@ func TestSyncStreamObservedReportsDeduplicatedCompletion(t *testing.T) {
 func TestSyncReportsInitialSyncFailure(t *testing.T) {
 	billing := &billingStub{syncErr: errors.New("billing unavailable")}
 	models := &modelStub{syncErr: errors.New("models unavailable")}
-	service := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models)
-	enableProactiveUpstreamSync(service)
-	result := service.Sync(context.Background(), 9)
+	result := NewService(slog.Default(), accountReaderStub{provider: accountdomain.ProviderBuild}, billing, nil, models).Sync(context.Background(), 9)
 	if result.Succeeded != 0 || result.Failed != 1 {
 		t.Fatalf("result = %#v", result)
 	}
@@ -329,10 +297,8 @@ func TestInitialSyncDoesNotRepeatUpstreamRequestsForSyncedAccount(t *testing.T) 
 	adapter := &countingAdapter{}
 	registry := provider.NewRegistry(adapter)
 	accountService := accountapp.NewService(accounts, audits, memory.NewDeviceSessionStore(), memory.NewStickyStore(), registry, cipher, nil)
-	accountService.SetUpstreamSyncPolicy(accountapp.UpstreamSyncPolicy{Billing: true, WebQuota: true, ModelCatalogCatchup: true})
 	modelService := modelapp.NewService(models, accounts, accountService, registry)
 	service := NewService(slog.Default(), accountService, accountService, accountService, modelService)
-	enableProactiveUpstreamSync(service)
 
 	if err := service.syncAccount(ctx, credential.ID); err != nil {
 		t.Fatal(err)

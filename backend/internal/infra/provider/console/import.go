@@ -22,7 +22,6 @@ type importDocument struct {
 
 type importEntry struct {
 	Name     string `json:"name"`
-	Email    string `json:"email"`
 	SSOToken string `json:"sso_token"`
 	Token    string `json:"token"`
 }
@@ -62,16 +61,11 @@ func parseImportedCredentials(data []byte) ([]provider.CredentialSeed, error) {
 			continue
 		}
 		seen[token] = struct{}{}
-		email := normalizeImportEmail(entry.Email)
 		name := strings.TrimSpace(entry.Name)
 		if name == "" {
-			if email != "" {
-				name = email
-			} else {
-				name = "Grok Console " + security.HashToken(token)[:8]
-			}
+			name = "Grok Console " + security.HashToken(token)[:8]
 		}
-		result = append(result, credentialSeed(name, email, token))
+		result = append(result, credentialSeed(name, token))
 	}
 	return result, nil
 }
@@ -81,8 +75,7 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 	seen := make(map[string]struct{}, len(lines))
 	result := make([]provider.CredentialSeed, 0, len(lines))
 	for index, line := range lines {
-		email, token := splitEmailSSOToken(line)
-		token = sanitizeSSOToken(token)
+		token := sanitizeSSOToken(line)
 		if token == "" {
 			continue
 		}
@@ -93,11 +86,7 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 			continue
 		}
 		seen[token] = struct{}{}
-		name := email
-		if name == "" {
-			name = "Grok Console " + security.HashToken(token)[:8]
-		}
-		result = append(result, credentialSeed(name, email, token))
+		result = append(result, credentialSeed("Grok Console "+security.HashToken(token)[:8], token))
 		if len(result) > maxImportAccounts {
 			return nil, provider.ErrCredentialLimit
 		}
@@ -108,9 +97,9 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 	return result, nil
 }
 
-func credentialSeed(name, email, token string) provider.CredentialSeed {
+func credentialSeed(name, token string) provider.CredentialSeed {
 	return provider.CredentialSeed{
-		Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: name, Email: email,
+		Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: name,
 		SourceKey: "console-sso:" + security.HashToken(token), AccessToken: token,
 	}
 }
@@ -118,7 +107,7 @@ func credentialSeed(name, email, token string) provider.CredentialSeed {
 func marshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
 	document := importDocument{Provider: string(account.ProviderConsole), Accounts: make([]importEntry, 0, len(values))}
 	for _, value := range values {
-		document.Accounts = append(document.Accounts, importEntry{Name: value.Name, Email: value.Email, SSOToken: value.AccessToken})
+		document.Accounts = append(document.Accounts, importEntry{Name: value.Name, SSOToken: value.AccessToken})
 	}
 	data, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -136,36 +125,6 @@ func sanitizeSSOToken(value string) string {
 		value = token
 	}
 	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(value))
-}
-
-func splitEmailSSOToken(line string) (email, token string) {
-	line = strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "", "\x00", "").Replace(line))
-	if line == "" {
-		return "", ""
-	}
-	if strings.HasPrefix(line, "eyJ") || !strings.Contains(line, "@") {
-		return "", line
-	}
-	at := strings.Index(line, "@")
-	if at < 0 {
-		return "", line
-	}
-	rest := line[at+1:]
-	colon := strings.Index(rest, ":")
-	if colon < 0 {
-		return normalizeImportEmail(line), ""
-	}
-	emailPart := line[:at+1+colon]
-	tokenPart := rest[colon+1:]
-	return normalizeImportEmail(emailPart), tokenPart
-}
-
-func normalizeImportEmail(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" || !strings.Contains(value, "@") || strings.ContainsAny(value, " \t") {
-		return ""
-	}
-	return value
 }
 
 func firstNonEmpty(values ...string) string {

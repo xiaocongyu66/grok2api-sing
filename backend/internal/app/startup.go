@@ -369,7 +369,7 @@ func (a *Application) runWebQuotaCatchup(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		ids, err := a.accountRepo.ListStaleWebQuotaAccountIDs(ctx, time.Now().UTC().Add(-webQuotaStaleAfter), 100)
+		ids, err := a.accountRepo.ListStaleWebQuotaAccountIDs(ctx, time.Now().UTC().Add(-webQuotaStaleAfter), 250)
 		if err == nil && len(ids) > 0 {
 			runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			var succeeded int
@@ -396,7 +396,7 @@ func (a *Application) runModelCatalogCatchup(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		ids, err := a.modelRepo.ListStaleAccountSyncIDs(ctx, time.Now().UTC().Add(-modelCatalogStaleAfter), 100)
+		ids, err := a.modelRepo.ListStaleAccountSyncIDs(ctx, time.Now().UTC().Add(-modelCatalogStaleAfter), 250)
 		if err == nil && len(ids) > 0 {
 			runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			var succeeded int

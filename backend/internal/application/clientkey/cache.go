@@ -10,9 +10,7 @@ import (
 const (
 	keyTouchInterval       = time.Minute
 	touchTrackerMaxEntries = 10000
-	// new-api style token cache: keep hot API keys in process memory briefly to cut DB hits.
-	// Billing-limited keys are never cached (see put) so spend checks stay fresh.
-	keyAuthCacheTTL        = 30 * time.Second
+	keyAuthCacheTTL        = time.Second
 	keyAuthCacheMaxEntries = 10000
 )
 

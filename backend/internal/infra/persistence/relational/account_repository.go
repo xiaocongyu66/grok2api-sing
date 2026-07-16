@@ -29,6 +29,7 @@ const (
 	providerQuotaExhaustedPredicate = `((provider_accounts.provider = 'grok_web' AND ((EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly' AND quota.remaining > 0)) OR (NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.mode = 'weekly') AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))) OR (provider_accounts.provider = 'grok_console' AND EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id) AND NOT EXISTS (SELECT 1 FROM account_quota_windows quota WHERE quota.account_id = provider_accounts.id AND quota.remaining > 0)))`
 	accountTypeSortExpression       = `CASE WHEN provider_accounts.provider = 'grok_web' THEN COALESCE((SELECT profile.tier FROM web_account_profiles profile WHERE profile.account_id = provider_accounts.id), 'auto') WHEN ` + accountPaidBillingPredicate + ` THEN 'paid' WHEN ` + accountFreeSignalPredicate + ` THEN 'free' ELSE 'unknown' END`
 	accountStatusSortExpression     = `CASE WHEN provider_accounts.enabled = FALSE THEN 4 WHEN provider_accounts.auth_status = 'reauthRequired' THEN 5 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 3 WHEN EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + ` THEN 2 WHEN provider_accounts.cooldown_until > CURRENT_TIMESTAMP THEN 1 ELSE 0 END`
+	missingConsoleAccountPredicate  = `NOT EXISTS (SELECT 1 FROM provider_accounts AS console_account WHERE console_account.provider = ? AND console_account.source_key = ('console-' || provider_accounts.source_key))`
 )
 
 func (r *AccountRepository) List(ctx context.Context, input repository.AccountListQuery) ([]account.Credential, int64, error) {
@@ -95,6 +96,33 @@ func (r *AccountRepository) List(ctx context.Context, input repository.AccountLi
 	return out, total, nil
 }
 
+func (r *AccountRepository) ListProviderAccountBatch(ctx context.Context, providerValue account.Provider, afterID uint64, limit int) ([]account.Credential, int64, error) {
+	if limit < 1 {
+		return []account.Credential{}, 0, nil
+	}
+	var total int64
+	if afterID == 0 {
+		if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("provider = ?", providerValue).Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
+	}
+	var rows []accountModel
+	if err := r.db.db.WithContext(ctx).
+		Preload("Credential").Preload("WebProfile").
+		Where("provider = ? AND id > ?", providerValue, afterID).
+		Order("id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, 0, err
+	}
+	out := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toAccountDomain(row))
+	}
+	if err := r.attachAccountLinks(ctx, out); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
+}
+
 func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]repository.AccountSummary, error) {
 	var rows []repository.AccountSummary
 	selectFields := `
@@ -105,8 +133,7 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND (EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'exhausted') OR ` + providerQuotaExhaustedPredicate + `) THEN 1 ELSE 0 END) AS waiting_reset,
 		SUM(CASE WHEN enabled = ? AND auth_status = ? AND EXISTS (SELECT 1 FROM account_quota_recovery recovery WHERE recovery.account_id = provider_accounts.id AND recovery.status = 'probing') THEN 1 ELSE 0 END) AS probing,
 		SUM(CASE WHEN enabled = ? THEN 1 ELSE 0 END) AS disabled,
-		SUM(CASE WHEN auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
-	// reauth_required counts every failed credential (enabled or not), matching ListFailedAccountIDs.
+		SUM(CASE WHEN enabled = ? AND auth_status = ? THEN 1 ELSE 0 END) AS reauth_required`
 	err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select(
 		selectFields,
 		true, account.AuthStatusActive, now,
@@ -114,7 +141,7 @@ func (r *AccountRepository) Summarize(ctx context.Context, now time.Time) ([]rep
 		true, account.AuthStatusActive,
 		true, account.AuthStatusActive,
 		false,
-		account.AuthStatusReauthRequired,
+		true, account.AuthStatusReauthRequired,
 	).Group("provider").Scan(&rows).Error
 	return rows, err
 }
@@ -258,63 +285,111 @@ func (r *AccountRepository) ListEnabledAccountIDs(ctx context.Context, provider 
 	return ids, err
 }
 
-func (r *AccountRepository) ListUnlinkedWebAccountIDs(ctx context.Context, limit int) ([]uint64, error) {
-	var ids []uint64
-	// Only healthy Web accounts: enabled + active auth. Failed/reauth accounts
-	// must not enter convert-all and burn proxies/device-flow attempts.
-	// limit <= 0 means return the full unlinked set (used for convert-all progress total).
-	query := r.db.db.WithContext(ctx).
-		Table("provider_accounts AS account").
-		Select("account.id").
-		Joins("LEFT JOIN account_provider_links AS link ON link.web_account_id = account.id").
-		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ? AND link.web_account_id IS NULL",
-			account.ProviderWeb, true, account.AuthStatusActive).
-		Order("account.id ASC")
-	if limit > 0 {
-		query = query.Limit(limit)
-	}
-	err := query.Scan(&ids).Error
-	return ids, err
-}
-
-// ListSSOAccountsForDedup returns all SSO credentials for a provider (including disabled/reauth).
-func (r *AccountRepository) ListSSOAccountsForDedup(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
-	var rows []accountModel
-	err := r.db.db.WithContext(ctx).
-		Preload("Credential").
-		Preload("WebProfile").
-		Joins("JOIN account_credentials AS credential ON credential.account_id = provider_accounts.id").
-		Where("provider_accounts.provider = ? AND credential.auth_type = ?", provider, account.AuthTypeSSO).
-		Order("provider_accounts.id ASC").
-		Find(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	out := make([]account.Credential, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, toAccountDomain(row))
-	}
-	return out, nil
-}
-
-// ListFailedAccountIDs returns reauthRequired (and optionally disabled) account IDs for a provider.
-func (r *AccountRepository) ListFailedAccountIDs(ctx context.Context, provider account.Provider, includeDisabled bool, limit int) ([]uint64, error) {
-	if limit < 1 {
+func (r *AccountRepository) FilterMissingBuildConversionIDs(ctx context.Context, ids []uint64) ([]uint64, error) {
+	if len(ids) == 0 {
 		return []uint64{}, nil
 	}
-	// Use the model table directly (no alias) so Postgres/SQLite both scan IDs reliably.
-	query := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("id").Where("provider = ?", string(provider))
-	if includeDisabled {
-		query = query.Where("auth_status = ? OR enabled = ?", string(account.AuthStatusReauthRequired), false)
-	} else {
-		query = query.Where("auth_status = ?", string(account.AuthStatusReauthRequired))
+	var linkedIDs []uint64
+	if err := r.db.db.WithContext(ctx).Model(&accountProviderLinkModel{}).
+		Where("web_account_id IN ?", ids).Pluck("web_account_id", &linkedIDs).Error; err != nil {
+		return nil, err
+	}
+	linked := make(map[uint64]struct{}, len(linkedIDs))
+	for _, id := range linkedIDs {
+		linked[id] = struct{}{}
+	}
+	values := make([]uint64, 0, len(ids)-len(linked))
+	for _, id := range ids {
+		if _, exists := linked[id]; !exists {
+			values = append(values, id)
+		}
+	}
+	return values, nil
+}
+
+func (r *AccountRepository) ListUnlinkedWebAccountIDs(ctx context.Context, afterID uint64, limit int) ([]uint64, int64, error) {
+	if limit < 1 {
+		return []uint64{}, 0, nil
+	}
+	query := func() *gorm.DB {
+		return r.db.db.WithContext(ctx).
+			Table("provider_accounts AS account").
+			Joins("LEFT JOIN account_provider_links AS link ON link.web_account_id = account.id").
+			Where("account.provider = ? AND link.web_account_id IS NULL", account.ProviderWeb)
+	}
+	var total int64
+	if afterID == 0 {
+		if err := query().Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
 	}
 	var ids []uint64
-	err := query.Order("id ASC").Limit(limit).Scan(&ids).Error
-	if ids == nil {
-		ids = []uint64{}
+	err := query().
+		Select("account.id").
+		Where("account.id > ?", afterID).
+		Order("account.id ASC").
+		Limit(limit).
+		Scan(&ids).Error
+	return ids, total, err
+}
+
+func (r *AccountRepository) ListMissingConsoleSyncAccounts(ctx context.Context, ids []uint64) ([]account.Credential, error) {
+	if len(ids) == 0 {
+		return []account.Credential{}, nil
 	}
-	return ids, err
+	var existing int64
+	if err := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id IN ? AND provider = ?", ids, account.ProviderWeb).Count(&existing).Error; err != nil {
+		return nil, err
+	}
+	if existing != int64(len(ids)) {
+		return nil, repository.ErrNotFound
+	}
+	var rows []accountModel
+	if err := r.db.db.WithContext(ctx).
+		Preload("Credential").Preload("WebProfile").
+		Where("id IN ? AND provider = ?", ids, account.ProviderWeb).
+		Where(missingConsoleAccountPredicate, account.ProviderConsole).
+		Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	values := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, toAccountDomain(row))
+	}
+	return values, nil
+}
+
+func (r *AccountRepository) ListMissingConsoleSyncBatch(ctx context.Context, afterID uint64, limit int) ([]account.Credential, int64, int64, error) {
+	if limit < 1 {
+		return []account.Credential{}, 0, 0, nil
+	}
+	query := func() *gorm.DB {
+		return r.db.db.WithContext(ctx).Model(&accountModel{}).
+			Where("provider = ?", account.ProviderWeb).
+			Where(missingConsoleAccountPredicate, account.ProviderConsole)
+	}
+	var total, skipped int64
+	if afterID == 0 {
+		if err := query().Count(&total).Error; err != nil {
+			return nil, 0, 0, err
+		}
+		var all int64
+		if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("provider = ?", account.ProviderWeb).Count(&all).Error; err != nil {
+			return nil, 0, 0, err
+		}
+		skipped = max(0, all-total)
+	}
+	var rows []accountModel
+	if err := query().Preload("Credential").Preload("WebProfile").
+		Where("id > ?", afterID).Order("id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, 0, 0, err
+	}
+	values := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, toAccountDomain(row))
+	}
+	return values, total, skipped, nil
 }
 
 func (r *AccountRepository) HasActive(ctx context.Context, provider account.Provider) (bool, error) {
@@ -438,7 +513,7 @@ func (r *AccountRepository) UpsertManyByIdentity(ctx context.Context, values []a
 		if err := tx.Where("identity_key IN ?", identityKeys).Find(&existingRows).Error; err != nil {
 			return err
 		}
-		existingByIdentity := make(map[string]accountModel, len(existingRows)+len(values))
+		existingByIdentity := make(map[string]accountModel, len(values))
 		for _, row := range existingRows {
 			existingByIdentity[row.IdentityKey] = row
 		}
@@ -585,21 +660,8 @@ func (r *AccountRepository) DeleteMany(ctx context.Context, ids []uint64) (int64
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	var deleted int64
-	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// media_jobs.account_id is ON DELETE RESTRICT — clear those rows first or bulk account delete fails silently in some drivers.
-		if err := tx.Where("account_id IN ?", ids).Delete(&mediaJobModel{}).Error; err != nil {
-			return err
-		}
-		// request_audits may keep a nullable account_id without cascade on older schemas.
-		if err := tx.Model(&requestAuditModel{}).Where("account_id IN ?", ids).Update("account_id", nil).Error; err != nil {
-			return err
-		}
-		result := tx.Where("id IN ?", ids).Delete(&accountModel{})
-		deleted = result.RowsAffected
-		return result.Error
-	})
-	return deleted, err
+	result := r.db.db.WithContext(ctx).Where("id IN ?", ids).Delete(&accountModel{})
+	return result.RowsAffected, result.Error
 }
 
 func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessToken, refreshToken string, expiresAt time.Time) (account.Credential, error) {
@@ -607,7 +669,7 @@ func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessT
 	refreshDueAt := account.CredentialRefreshDueAt(id, expiresAt)
 	updates := map[string]any{
 		"encrypted_primary": accessToken, "expires_at": expiresAt, "refresh_due_at": refreshDueAt,
-		"last_refresh_at": now, "refresh_failures": 0, "last_refresh_error": "", "updated_at": now,
+		"last_refresh_at": now, "refresh_failures": 0, "last_refresh_error": "", "refresh_permanent": false, "updated_at": now,
 	}
 	if refreshToken != "" {
 		updates["encrypted_refresh"] = refreshToken
@@ -709,10 +771,10 @@ func (r *AccountRepository) NextCredentialRefreshDueAt(ctx context.Context) (*ti
 	return &value, nil
 }
 
-func (r *AccountRepository) UpdateCredentialRefreshFailure(ctx context.Context, id uint64, failureCount int, retryAt time.Time, errorCode string) error {
+func (r *AccountRepository) UpdateCredentialRefreshFailure(ctx context.Context, id uint64, failureCount int, retryAt time.Time, errorCode string, permanent bool) error {
 	return r.db.db.WithContext(ctx).Model(&accountCredentialModel{}).Where("account_id = ?", id).Updates(map[string]any{
 		"refresh_due_at": retryAt.UTC(), "refresh_failures": max(0, failureCount),
-		"last_refresh_error": truncate(errorCode, 100), "updated_at": time.Now().UTC(),
+		"last_refresh_error": truncate(errorCode, 100), "refresh_permanent": permanent, "updated_at": time.Now().UTC(),
 	}).Error
 }
 

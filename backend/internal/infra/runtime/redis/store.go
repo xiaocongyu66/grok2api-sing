@@ -1,6 +1,9 @@
 package redis
 
 import (
+	"github.com/chenyme/grok2api/backend/internal/pkg/clientid"
+	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
+	"sort"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -8,15 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
-	"github.com/chenyme/grok2api/backend/internal/infra/runtime/connections"
-	"github.com/chenyme/grok2api/backend/internal/pkg/clientid"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	redisclient "github.com/redis/go-redis/v9"
 )
@@ -520,6 +520,14 @@ func (l *ConcurrencyLimiter) CurrentMany(ctx context.Context, keys []string) (ma
 	return l.store.CurrentMany(ctx, keys)
 }
 
+// LockStore 适配 DistributedLock。
+type LockStore struct{ store *Store }
+
+func NewLockStore(store *Store) *LockStore { return &LockStore{store: store} }
+func (l *LockStore) Acquire(ctx context.Context, key string, ttl time.Duration) (func(), bool, error) {
+	return l.store.acquireLock(ctx, strings.TrimSpace(key), ttl)
+}
+
 // ConnectionTracker shares site-wide in-flight /v1 request counts across instances.
 // Keys: {prefix}conn:active, {prefix}conn:peak, {prefix}conn:total, {prefix}conn:clients (hash)
 type ConnectionTracker struct{ store *Store }
@@ -618,20 +626,12 @@ func (t *ConnectionTracker) Snapshot(ctx context.Context) connections.Stats {
 }
 
 func redisInt64(cmd *redisclient.StringCmd) int64 {
-	value, err := cmd.Int64()
+	if cmd == nil {
+		return 0
+	}
+	v, err := cmd.Int64()
 	if err != nil {
 		return 0
 	}
-	return value
-}
-
-// Ensure ConnectionTracker implements connections.Tracker.
-var _ connections.Tracker = (*ConnectionTracker)(nil)
-
-// LockStore 适配 DistributedLock。
-type LockStore struct{ store *Store }
-
-func NewLockStore(store *Store) *LockStore { return &LockStore{store: store} }
-func (l *LockStore) Acquire(ctx context.Context, key string, ttl time.Duration) (func(), bool, error) {
-	return l.store.acquireLock(ctx, strings.TrimSpace(key), ttl)
+	return v
 }

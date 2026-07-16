@@ -187,6 +187,12 @@ sendLoop:
 }
 
 func (s *Service) syncAccount(ctx context.Context, accountID uint64) error {
+	// CPA default (all proactive flags off): import pipeline only needs to drain IDs;
+	// skip DB reads and upstream HTTP entirely.
+	syncPolicy := s.upstreamSyncPolicy()
+	if !syncPolicy.Billing && !syncPolicy.WebQuota && !syncPolicy.ModelCatalogCatchup {
+		return nil
+	}
 	var syncErr error
 	view, err := s.accounts.Get(ctx, accountID)
 	if err != nil {
@@ -200,7 +206,6 @@ func (s *Service) syncAccount(ctx context.Context, accountID uint64) error {
 	if !ok {
 		return fmt.Errorf("Provider %s 未注册生命周期策略", view.Credential.Provider)
 	}
-	syncPolicy := s.upstreamSyncPolicy()
 	autoCtx := accountapp.WithSyncSource(ctx, accountapp.SyncSourceAuto)
 	if definition.Quota == provider.QuotaRemoteWindow || definition.Quota == provider.QuotaLocalWindow {
 		if syncPolicy.WebQuota {

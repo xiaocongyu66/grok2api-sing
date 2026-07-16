@@ -75,9 +75,6 @@ func (a *Adapter) config() Config {
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
-	if request.Credential.ID != 0 {
-		ctx = WithEgressAffinity(ctx, fmt.Sprintf("build:%d", request.Credential.ID))
-	}
 	accessToken, err := a.cipher.Decrypt(request.Credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, err
@@ -98,9 +95,16 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return invalidResponsesResponse(err), nil
 		}
 	}
-	// Ensure upstream body carries the same affinity key as x-grok-conv-id headers.
-	// Chat/Messages conversion may drop prompt_cache_key; reinject after normalize.
-	body = ensurePromptCacheKeyInBody(body, request.PromptCacheKey)
+	if len(body) > 0 && request.Method == http.MethodPost {
+		body, err = injectPromptCacheKey(body, request.PromptCacheKey)
+		if err != nil {
+			err = fmt.Errorf("写入 prompt_cache_key: %w", err)
+			if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
+				return invalidConversationResponse(request.Operation, err), nil
+			}
+			return invalidResponsesResponse(err), nil
+		}
+	}
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
@@ -166,24 +170,39 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			resp.Header.Del("Content-Length")
 			resp.Header.Set("Content-Type", "text/event-stream")
 		} else {
-			data, readErr := io.ReadAll(io.LimitReader(resp.Body, (64<<20)+1))
+			var data []byte
+			var readErr error
+			var diagnosticTruncated bool
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				data, readErr = io.ReadAll(io.LimitReader(resp.Body, (64<<20)+1))
+			} else {
+				data, diagnosticTruncated, readErr = provider.ReadDiagnosticBody(resp.Body)
+			}
 			_ = resp.Body.Close()
 			if readErr != nil {
 				return nil, readErr
 			}
-			if len(data) > 64<<20 {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(data) > 64<<20 {
 				return nil, fmt.Errorf("上游对话响应超过 64 MiB")
+			}
+			var diagnostic *provider.DiagnosticResponse
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				diagnostic = &provider.DiagnosticResponse{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: data, BodyTruncated: diagnosticTruncated}
 			}
 			converted, convertErr := conversation.ConvertResponseJSONWithOptions(data, request.Operation, conversationOptions)
 			if convertErr != nil {
-				return nil, convertErr
+				if diagnostic == nil {
+					return nil, convertErr
+				}
+				return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: diagnostic.Header.Clone(), Body: io.NopCloser(bytes.NewReader(data)), UpstreamURL: req.URL.String(), Diagnostic: diagnostic}, nil
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(converted))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(converted)))
 			resp.Header.Set("Content-Type", "application/json")
+			return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: req.URL.String(), Diagnostic: diagnostic}, nil
 		}
 	}
-	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body}, nil
+	return &provider.Response{StatusCode: resp.StatusCode, Status: resp.Status, Header: resp.Header.Clone(), Body: resp.Body, UpstreamURL: req.URL.String()}, nil
 }
 
 // invalidResponsesResponse 将本地协议校验错误转换为标准 OpenAI 错误响应，避免触发上游账号重试。
@@ -223,9 +242,6 @@ func invalidConversationResponse(operation string, err error) *provider.Response
 }
 
 func (a *Adapter) ListModels(ctx context.Context, credential account.Credential) ([]string, error) {
-	if credential.ID != 0 {
-		ctx = WithEgressAffinity(ctx, fmt.Sprintf("build:%d", credential.ID))
-	}
 	accessToken, err := a.cipher.Decrypt(credential.EncryptedAccessToken)
 	if err != nil {
 		return nil, err
@@ -352,34 +368,6 @@ func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, 
 	return marshalCredentials(values)
 }
 
-// ensurePromptCacheKeyInBody sets body prompt_cache_key when the gateway resolved a stable key.
-func ensurePromptCacheKeyInBody(body []byte, promptCacheKey string) []byte {
-	promptCacheKey = strings.TrimSpace(promptCacheKey)
-	if promptCacheKey == "" || len(body) == 0 {
-		return body
-	}
-	var payload map[string]json.RawMessage
-	if json.Unmarshal(body, &payload) != nil {
-		return body
-	}
-	if raw, ok := payload["prompt_cache_key"]; ok {
-		var existing string
-		if json.Unmarshal(raw, &existing) == nil && strings.TrimSpace(existing) != "" {
-			return body
-		}
-	}
-	encoded, err := json.Marshal(promptCacheKey)
-	if err != nil {
-		return body
-	}
-	payload["prompt_cache_key"] = encoded
-	out, err := json.Marshal(payload)
-	if err != nil {
-		return body
-	}
-	return out
-}
-
 func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential, accessToken, model, promptCacheKey string, trace bool) error {
 	cfg := a.config()
 	identity, err := a.clientIdentity(credential.ID)
@@ -390,8 +378,6 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	if err != nil {
 		return err
 	}
-	// Prefer the gateway-resolved affinity key. Only invent a random id when the
-	// caller truly has none — that path cannot hit prompt cache across turns.
 	conversationID := strings.TrimSpace(promptCacheKey)
 	if conversationID == "" {
 		conversationID, err = randomHex(16)
@@ -455,6 +441,22 @@ func (a *Adapter) clientIdentity(accountID uint64) (clientIdentity, error) {
 	return value, nil
 }
 
+func injectPromptCacheKey(body []byte, clientKey string) ([]byte, error) {
+	key := strings.TrimSpace(clientKey)
+	if key == "" {
+		return body, nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if payload == nil {
+		payload = make(map[string]json.RawMessage)
+	}
+	payload["prompt_cache_key"] = mustJSON(key)
+	return json.Marshal(payload)
+}
+
 func randomHex(bytesLength int) (string, error) {
 	value := make([]byte, bytesLength)
 	if _, err := rand.Read(value); err != nil {
@@ -509,9 +511,6 @@ func (a *Adapter) url(path string) string {
 }
 
 func (a *Adapter) getBilling(ctx context.Context, credential account.Credential, accessToken, query string) (account.Billing, error) {
-	if credential.ID != 0 {
-		ctx = WithEgressAffinity(ctx, fmt.Sprintf("build:%d", credential.ID))
-	}
 	endpoint := a.url("/billing")
 	if query != "" {
 		endpoint += "?" + query

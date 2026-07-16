@@ -398,6 +398,36 @@ func TestConvertResponsesStream(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesStreamChatErrorIsTerminal(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.5","status":"in_progress"}}`, "",
+		`event: response.failed`,
+		`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"upstream failed"}}}`, "",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"late delta"}`, "",
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`, "", "",
+	}, "\n")
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationChat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := string(converted)
+	if !strings.Contains(value, `"type":"response.failed"`) {
+		t.Fatalf("missing upstream failure: %s", value)
+	}
+	if strings.Contains(value, `"finish_reason":"stop"`) {
+		t.Fatalf("error stream must not end successfully: %s", value)
+	}
+	if strings.Contains(value, "late delta") {
+		t.Fatalf("events after an error must be ignored: %s", value)
+	}
+	if strings.Count(value, "data: [DONE]") != 1 {
+		t.Fatalf("error stream must send one terminator: %s", value)
+	}
+}
+
 func TestConvertResponsesStreamToMessagesThinkingToolsAndStop(t *testing.T) {
 	stream := strings.Join([]string{
 		`event: response.created`,
@@ -456,36 +486,22 @@ func TestConvertResponsesStreamEmitsDoneOnlyToolArguments(t *testing.T) {
 	}
 }
 
-// TestConvertResponsesStreamClosesTextBeforeTool 回归 Claude Code “Content block not found”：
-// text/thinking 未 stop 就发出 tool_use content_block_start 时，客户端会按 index 查找失败。
-func TestConvertResponsesStreamClosesTextBeforeTool(t *testing.T) {
+func TestConvertResponsesStreamMessagesInputTokens(t *testing.T) {
 	stream := strings.Join([]string{
 		`event: response.created`,
 		`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4.5","status":"in_progress"}}`, "",
 		`event: response.output_text.delta`,
-		`data: {"type":"response.output_text.delta","delta":"Let me read that."}`, "",
-		`event: response.output_item.added`,
-		`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"item_1","type":"function_call","call_id":"call_1","name":"Read","arguments":""}}`, "",
-		`event: response.function_call_arguments.done`,
-		`data: {"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{\"path\":\"a.go\"}"}`, "",
+		`data: {"type":"response.output_text.delta","delta":"hello"}`, "",
 		`event: response.completed`,
-		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`, "", "",
+		`data: {"type":"response.completed","response":{"id":"resp_1","model":"grok-4.5","status":"completed","usage":{"input_tokens":194,"output_tokens":7}}}`, "", "",
 	}, "\n")
-	converted, err := io.ReadAll(ConvertResponseStreamWithOptions(io.NopCloser(strings.NewReader(stream)), OperationMessages, ResponseOptions{}))
+	converted, err := io.ReadAll(ConvertResponseStream(io.NopCloser(strings.NewReader(stream)), OperationMessages))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(converted)
-	textStart := strings.Index(text, `"type":"text"`)
-	textStop := strings.Index(text, `"type":"content_block_stop"`)
-	toolStart := strings.Index(text, `"type":"tool_use"`)
-	if textStart < 0 || textStop < 0 || toolStart < 0 {
-		t.Fatalf("missing blocks:\n%s", text)
-	}
-	if !(textStart < textStop && textStop < toolStart) {
-		t.Fatalf("text must stop before tool_use start:\n%s", text)
-	}
-	if strings.Count(text, `"type":"content_block_start"`) != 2 || strings.Count(text, `"type":"content_block_stop"`) != 2 {
-		t.Fatalf("expected one text + one tool block fully closed:\n%s", text)
+
+	if !strings.Contains(text, `"input_tokens":194`) {
+		t.Fatalf("message_delta should contain input_tokens from response.completed usage:\n%s", text)
 	}
 }

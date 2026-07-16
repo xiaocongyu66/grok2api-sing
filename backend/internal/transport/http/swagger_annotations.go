@@ -162,7 +162,7 @@ func swaggerChat() {}
 // @Param request body SwaggerMessagesRequest true "请求"
 // @Success 200 {object} map[string]any
 // @Failure 400 {object} map[string]any
-// @Router /Anthropic/messages [post]
+// @Router /v1/messages [post]
 func swaggerMessages() {}
 
 // swaggerGenerateImage godoc

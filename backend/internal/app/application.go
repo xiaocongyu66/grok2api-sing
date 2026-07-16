@@ -39,6 +39,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
+	httpmiddleware "github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 )
 
 // Application 管理后端进程生命周期和本地后台任务。
@@ -143,7 +144,6 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		refreshLock = redisruntime.NewLockStore(redisStore)
 		settingsBus = redisStore
 		quotaQueue = redisStore
-		// new-api / sub2api style: Redis as hot cache for multi-turn Web state.
 		responseRepo = redisruntime.NewResponseStateCache(responseRepo, redisStore)
 	case "memory":
 		rateLimiter = memory.NewRateLimiter()
@@ -156,7 +156,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, fmt.Errorf("不支持的运行态驱动: %s", cfg.RuntimeStore.Driver)
 	}
-	mediaService := mediaapp.NewService(mediaAssetRepo, localMediaStore, refreshLock, mediaConfig(cfg))
+	mediaService := mediaapp.NewService(mediaAssetRepo, mediaJobRepo, localMediaStore, refreshLock, mediaConfig(cfg))
 
 	egressManager := infraegress.NewManager(egressRepo, cipher)
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{BaseURL: cfg.Provider.Build.BaseURL, ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier, TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent}, cipher)
@@ -231,13 +231,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		return nil, fmt.Errorf("初始化 Grok Console 模型目录: %w", err)
 	}
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
+	accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
 	accountSyncService.SetBulkPool(importPool)
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
-	accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, cfg.Provider.Console.UserAgent)
-	egressService.SetRuntime(egressManager)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
-	// new-api style Redis token cache: multi-instance shared API key auth objects.
 	// Affinity: SQL is durable source of truth; Redis/memory is a hot cache layer.
 	sqlAffinity := relational.NewAffinityStore(database)
 	var affinityCache promptcache.Cache = memory.NewAffinityStore()
@@ -260,10 +258,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
 	gatewayService.SetLogger(logger)
-	gatewayService.UpdateRetryPolicy(cfg.Routing.RetryStatusCodes, cfg.Routing.RetryServerErrors)
 	gatewayService.ConfigureMedia(mediaJobRepo, cfg.Provider.Web.MediaConcurrency)
 	quotaRecoveryService := quotarecoveryapp.NewService(logger, quotaQueue, accountService, cfg.Provider.Web.RecoveryBackoffBase.Value(), cfg.Provider.Web.RecoveryBackoffMax.Value())
 	quotaRecoveryService.SetBulkPool(syncPool)
+	inferenceConcurrency := httpmiddleware.NewConcurrencyGate(cfg.Server.MaxConcurrentRequests)
 	var notifySettings func(context.Context)
 	if settingsBus != nil {
 		notifySettings = func(notifyCtx context.Context) {
@@ -275,6 +273,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		}
 	}
 	settingsService := settingsapp.NewService(cfg, settingsUpdatedAt, settingsRevision, runtimeSettingsRepo, notifySettings, func(next config.Config) {
+		inferenceConcurrency.UpdateLimit(next.Server.MaxConcurrentRequests)
+		promptCacheAffinity.UpdatePolicy(promptcache.Policy{
+			Enabled: next.Routing.PromptCacheAffinity.Enabled, Fingerprint: next.Routing.PromptCacheAffinity.Fingerprint,
+			Expire: next.Routing.PromptCacheAffinity.Expire, TTL: next.Routing.PromptCacheAffinity.TTL.Value(),
+		})
 		bulkPool.UpdateLimit(maxBatchConcurrency(next.Batch))
 		importPool.UpdateLimit(next.Batch.ImportConcurrency)
 		conversionPool.UpdateLimit(next.Batch.ConversionConcurrency)
@@ -297,12 +300,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
 		accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
-		promptCacheAffinity.UpdatePolicy(promptcache.Policy{
-			Enabled: next.Routing.PromptCacheAffinity.Enabled, Fingerprint: next.Routing.PromptCacheAffinity.Fingerprint,
-			Expire: next.Routing.PromptCacheAffinity.Expire, TTL: next.Routing.PromptCacheAffinity.TTL.Value(),
-		})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
-		gatewayService.UpdateRetryPolicy(next.Routing.RetryStatusCodes, next.Routing.RetryServerErrors)
 		auditService.UpdateConfig(next.Audit.BatchSize, next.Audit.FlushInterval.Value())
 		clientKeyService.UpdateDefaults(next.ClientKeyDefaults.RPMLimit, next.ClientKeyDefaults.MaxConcurrent)
 	})
@@ -311,14 +309,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	readiness := func(readyCtx context.Context) httpserver.ReadinessSnapshot {
 		return readinessSnapshot(readyCtx, startup, runtimeHealth, modelRepo, accountRepo, providers)
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURL, FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, PromptCacheAffinity: promptCacheAffinity, Connections: connectionTracker})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, PromptCacheAffinity: promptCacheAffinity, Connections: connectionTracker})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, runtime: runtimeStore,
 		settingsBus: settingsBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService,
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, startup: startup,
-		affinitySQL: sqlAffinity,
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, startup: startup, affinitySQL: sqlAffinity,
 	}, nil
 }
 
@@ -346,9 +343,9 @@ func consoleProviderConfig(cfg config.Config) consoleprovider.Config {
 
 func mediaConfig(cfg config.Config) mediaapp.Config {
 	return mediaapp.Config{
-		PublicBaseURL: cfg.Frontend.PublicAPIBaseURL, MaxImageBytes: cfg.Media.MaxImageBytes,
-		MaxTotalBytes: cfg.Media.MaxTotalBytes, CleanupThresholdPercent: cfg.Media.CleanupThresholdPercent,
-		CleanupInterval: cfg.Media.CleanupInterval.Value(),
+		PublicBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(),
+		MaxImageBytes: cfg.Media.MaxImageBytes, MaxTotalBytes: cfg.Media.MaxTotalBytes,
+		CleanupThresholdPercent: cfg.Media.CleanupThresholdPercent, CleanupInterval: cfg.Media.CleanupInterval.Value(),
 	}
 }
 
@@ -404,16 +401,6 @@ func (a *Application) Run(ctx context.Context) error {
 	startBackground("response_ownership_cleanup", func(taskCtx context.Context) error {
 		a.runPeriodicTask(taskCtx, 24*time.Hour, "response_ownership_cleanup", func(runCtx context.Context) error {
 			_, err := a.responses.DeleteExpired(runCtx, time.Now().UTC())
-			return err
-		})
-		return nil
-	})
-	startBackground("prompt_cache_affinity_cleanup", func(taskCtx context.Context) error {
-		a.runPeriodicTask(taskCtx, time.Hour, "prompt_cache_affinity_cleanup", func(runCtx context.Context) error {
-			if a.affinitySQL == nil {
-				return nil
-			}
-			_, err := a.affinitySQL.DeleteExpired(runCtx, time.Now().UTC())
 			return err
 		})
 		return nil

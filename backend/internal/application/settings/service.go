@@ -113,13 +113,23 @@ type ProactiveUpstreamSyncConfig struct {
 }
 
 // EditableConfig 聚合管理端允许修改的运行参数。
+type ServerConfig struct {
+	MaxConcurrentRequests int
+}
+
+type FrontendConfig struct {
+	PublicAPIBaseURL string
+}
+
 type EditableConfig struct {
+	Server                ServerConfig
 	ProviderBuild         ProviderBuildConfig
 	ProviderWeb           ProviderWebConfig
 	ProviderConsole       ProviderConsoleConfig
 	ProactiveUpstreamSync ProactiveUpstreamSyncConfig
 	Batch                 BatchConfig
 	Media                 MediaConfig
+	Frontend              FrontendConfig
 	Routing               RoutingConfig
 	PromptCacheAffinity   PromptCacheAffinityConfig
 	Audit                 AuditConfig
@@ -174,6 +184,12 @@ func LoadPersisted(ctx context.Context, base config.Config, repository repositor
 }
 
 // Get 返回当前生效的可编辑设置快照。
+func (s *Service) PublicAPIBaseURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Frontend.EffectivePublicAPIBaseURL()
+}
+
 func (s *Service) Get() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -253,6 +269,10 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 }
 
 func applyDomainConfig(base config.Config, value settingsdomain.Config) config.Config {
+	if value.Server.MaxConcurrentRequests > 0 {
+		base.Server.MaxConcurrentRequests = value.Server.MaxConcurrentRequests
+	}
+	base.Frontend.PublicAPIBaseURLOverride = strings.TrimSpace(value.Frontend.PublicAPIBaseURL)
 	capacityWait := value.Routing.CapacityWait
 	if capacityWait <= 0 {
 		capacityWait = base.Routing.CapacityWait.Value()
@@ -326,6 +346,8 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 func toDomainConfig(value config.Config) settingsdomain.Config {
 	randomDelay := value.Batch.RandomDelay.Value()
 	return settingsdomain.Config{
+		Server: settingsdomain.ServerConfig{MaxConcurrentRequests: value.Server.MaxConcurrentRequests},
+		Frontend: settingsdomain.FrontendConfig{PublicAPIBaseURL: value.Frontend.PublicAPIBaseURLOverride},
 		ProviderBuild: settingsdomain.ProviderBuildConfig{
 			BaseURL: value.Provider.Build.BaseURL, ClientVersion: value.Provider.Build.ClientVersion,
 			ClientIdentifier: value.Provider.Build.ClientIdentifier, TokenAuth: value.Provider.Build.TokenAuth,
@@ -398,6 +420,8 @@ func (s *Service) snapshotLocked() Snapshot {
 
 func mergeEditable(current config.Config, input EditableConfig) (config.Config, error) {
 	next := current
+	next.Server.MaxConcurrentRequests = input.Server.MaxConcurrentRequests
+	next.Frontend.PublicAPIBaseURLOverride = strings.TrimSpace(input.Frontend.PublicAPIBaseURL)
 	next.Provider.Build.BaseURL = strings.TrimSpace(input.ProviderBuild.BaseURL)
 	next.Provider.Build.ClientVersion = strings.TrimSpace(input.ProviderBuild.ClientVersion)
 	next.Provider.Build.ClientIdentifier = strings.TrimSpace(input.ProviderBuild.ClientIdentifier)
@@ -483,6 +507,8 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 
 func toEditable(cfg config.Config) EditableConfig {
 	return EditableConfig{
+		Server: ServerConfig{MaxConcurrentRequests: cfg.Server.MaxConcurrentRequests},
+		Frontend: FrontendConfig{PublicAPIBaseURL: cfg.Frontend.PublicAPIBaseURLOverride},
 		ProviderBuild: ProviderBuildConfig{
 			BaseURL: cfg.Provider.Build.BaseURL, ClientVersion: cfg.Provider.Build.ClientVersion,
 			ClientIdentifier: cfg.Provider.Build.ClientIdentifier, TokenAuth: cfg.Provider.Build.TokenAuth,

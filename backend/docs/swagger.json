@@ -231,7 +231,7 @@
                 }
             }
         },
-        "/Anthropic/messages": {
+        "/v1/messages": {
             "post": {
                 "security": [
                     {

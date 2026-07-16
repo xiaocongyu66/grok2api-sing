@@ -134,9 +134,9 @@ func TestGatewayErrorPreservesSanitizedUpstreamClassification(t *testing.T) {
 func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).RegisterAnthropic(router.Group("/Anthropic"))
+	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
 
-	missingVersion := httptest.NewRequest(http.MethodPost, "/Anthropic/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
+	missingVersion := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
 	missingVersion.Header.Set("Content-Type", "application/json")
 	missingRecorder := httptest.NewRecorder()
 	router.ServeHTTP(missingRecorder, missingVersion)
@@ -144,7 +144,7 @@ func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 		t.Fatalf("missing version status=%d body=%s", missingRecorder.Code, missingRecorder.Body.String())
 	}
 
-	valid := httptest.NewRequest(http.MethodPost, "/Anthropic/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
+	valid := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
 	valid.Header.Set("Content-Type", "application/json")
 	valid.Header.Set("anthropic-version", "2023-06-01")
 	validRecorder := httptest.NewRecorder()
@@ -153,7 +153,7 @@ func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 		t.Fatalf("valid shape status=%d body=%s", validRecorder.Code, validRecorder.Body.String())
 	}
 
-	zeroTokens := httptest.NewRequest(http.MethodPost, "/Anthropic/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`))
+	zeroTokens := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`))
 	zeroTokens.Header.Set("Content-Type", "application/json")
 	zeroTokens.Header.Set("anthropic-version", "2023-06-01")
 	zeroRecorder := httptest.NewRecorder()
@@ -311,47 +311,6 @@ func TestExtractUsageFromCompletedEvent(t *testing.T) {
 	}
 	if usage.CostInUSDTicks != 158500 || usage.NumSourcesUsed != 1 || usage.NumServerSideToolsUsed != 2 || usage.ContextInputTokens != 9 || usage.ContextOutputTokens != 4 || usage.ResponseModel != "grok-4.5-build-free" {
 		t.Fatalf("observed usage = %#v", usage)
-	}
-}
-
-func TestExtractUsageFromAnthropicAndChatCacheFields(t *testing.T) {
-	anthropic := extractMetadata([]byte(`{"id":"msg_1","type":"message","usage":{"input_tokens":20,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":12}}`))
-	if anthropic.Usage.CachedInputTokens != 12 || anthropic.Usage.InputTokens != 20 {
-		t.Fatalf("anthropic usage = %#v", anthropic.Usage)
-	}
-	chat := extractMetadata([]byte(`{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":30,"completion_tokens":4,"total_tokens":34,"prompt_tokens_details":{"cached_tokens":18}}}`))
-	if chat.Usage.CachedInputTokens != 18 || chat.Usage.InputTokens != 30 || chat.Usage.OutputTokens != 4 {
-		t.Fatalf("chat usage = %#v", chat.Usage)
-	}
-}
-
-func TestResolvePromptCacheKeyPriority(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	req.Header.Set("x-grok-conv-id", "from-header")
-	c.Request = req
-
-	if got := resolvePromptCacheKey(c, "from-body", "user", "meta"); got != "from-body" {
-		t.Fatalf("explicit body key = %q", got)
-	}
-	if got := resolvePromptCacheKey(c, "", "user-a", ""); got != "user-a" {
-		t.Fatalf("user field = %q", got)
-	}
-	if got := resolvePromptCacheKey(c, "", "", "meta-user"); got != "meta-user" {
-		t.Fatalf("metadata user = %q", got)
-	}
-	if got := resolvePromptCacheKey(c, "", "", ""); got != "from-header" {
-		t.Fatalf("header key = %q", got)
-	}
-}
-
-func TestUsageInspectorKeepsCachedTokensFromCompletedEvent(t *testing.T) {
-	inspector := &responseInspector{}
-	inspector.Inspect([]byte(`data: {"type":"response.completed","response":{"id":"resp_c","usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":80},"output_tokens":10,"total_tokens":110}}}` + "\n"))
-	usage := inspector.Metadata().Usage
-	if usage.CachedInputTokens != 80 || usage.InputTokens != 100 || usage.OutputTokens != 10 {
-		t.Fatalf("stream usage = %#v", usage)
 	}
 }
 

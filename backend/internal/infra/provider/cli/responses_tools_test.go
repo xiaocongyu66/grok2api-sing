@@ -141,23 +141,14 @@ func TestNormalizeResponsesRequestRejectsHostedToolSearch(t *testing.T) {
 	}
 }
 
-func TestNormalizeResponsesRequestForcesSerialClientToolSearch(t *testing.T) {
-	normalized, compatibility, err := normalizeResponsesRequest([]byte(`{
+func TestNormalizeResponsesRequestRejectsParallelClientToolSearch(t *testing.T) {
+	_, _, err := normalizeResponsesRequest([]byte(`{
 		"model":"public","input":"hello","parallel_tool_calls":true,
 		"tools":[{"type":"tool_search","execution":"client"}]
 	}`), "grok-4.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var request map[string]any
-	if err := json.Unmarshal(normalized, &request); err != nil {
-		t.Fatal(err)
-	}
-	if parallel, ok := request["parallel_tool_calls"].(bool); !ok || parallel {
-		t.Fatalf("客户端 tool_search 必须串行执行: %#v", request["parallel_tool_calls"])
-	}
-	if compatibility == nil || !strings.Contains(compatibility.warningHeader(), "client_tool_search_serial_forced") {
-		t.Fatalf("缺少串行收敛警告: %q", compatibility.warningHeader())
+	requestErr, ok := err.(*responsesRequestError)
+	if !ok || requestErr.Code != "unsupported_parameter" || requestErr.Param != "parallel_tool_calls" {
+		t.Fatalf("error = %#v", err)
 	}
 }
 

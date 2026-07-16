@@ -178,6 +178,10 @@ func (s *Service) List(ctx context.Context, page, pageSize int) ([]auditdomain.R
 	return s.audits.List(ctx, (page-1)*pageSize, pageSize)
 }
 
+func (s *Service) Get(ctx context.Context, id uint64) (auditdomain.Record, error) {
+	return s.audits.Get(ctx, id)
+}
+
 // CursorResult 表示按递减 ID 游标读取的一页审计记录。
 type CursorResult struct {
 	Items      []auditdomain.Record
@@ -213,7 +217,7 @@ func (s *Service) ListCursor(ctx context.Context, rawCursor string, pageSize int
 	if filter.Sort.Field == "" && filter.Sort.Direction == "" {
 		filter.Sort = repository.SortQuery{Field: "createdAt", Direction: repository.SortDescending}
 	}
-	if !validAuditFilter(filter.Status, "", "success", "clientError", "serverError", "2xx", "4xx", "5xx") || !validAuditFilter(filter.Mode, "", "stream", "nonStream") || !repository.IsValidSort(filter.Sort, "request", "key", "model", "billing", "tokens", "status", "mode", "duration", "createdAt") {
+	if !validAuditFilter(filter.Status, "", "success", "clientError", "serverError", "2xx", "4xx", "5xx") || !validAuditFilter(filter.Mode, "", "stream", "nonStream") || !repository.IsValidSort(filter.Sort, "request", "model", "billing", "tokens", "status", "mode", "duration", "createdAt") {
 		return CursorResult{}, ErrInvalidFilter
 	}
 	cursor, err := decodeAuditCursor(rawCursor, filter.Sort)
@@ -270,7 +274,7 @@ func encodeAuditCursor(value auditdomain.Record, sort repository.SortQuery) (str
 
 func parseAuditCursorValue(field, value string) (any, error) {
 	switch field {
-	case "request", "key", "model":
+	case "request", "model":
 		return value, nil
 	case "billing", "tokens", "status", "mode", "duration":
 		return strconv.ParseInt(value, 10, 64)
@@ -285,8 +289,6 @@ func formatAuditCursorValue(value auditdomain.Record, field string) string {
 	switch field {
 	case "request":
 		return value.RequestID
-	case "key":
-		return strings.ToLower(strings.TrimSpace(value.ClientKeyName))
 	case "model":
 		return strings.ToLower(value.ModelPublicID)
 	case "billing":

@@ -53,16 +53,30 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen         string   `yaml:"listen"`
-	MaxBodyBytes   int64    `yaml:"maxBodyBytes"`
-	ReadTimeout    Duration `yaml:"readTimeout"`
-	RequestTimeout Duration `yaml:"requestTimeout"`
-	SwaggerEnabled bool     `yaml:"swaggerEnabled"`
+	Listen                string   `yaml:"listen"`
+	MaxBodyBytes          int64    `yaml:"maxBodyBytes"`
+	MaxConcurrentRequests int      `yaml:"maxConcurrentRequests"`
+	ReadTimeout           Duration `yaml:"readTimeout"`
+	RequestTimeout        Duration `yaml:"requestTimeout"`
+	SwaggerEnabled        bool     `yaml:"swaggerEnabled"`
 }
 
 type FrontendConfig struct {
-	PublicAPIBaseURL string `yaml:"publicApiBaseURL"`
-	StaticPath       string `yaml:"staticPath"`
+	PublicAPIBaseURL         string `yaml:"publicApiBaseURL"`
+	PublicAPIBaseURLOverride string `yaml:"-"`
+	StaticPath               string `yaml:"staticPath"`
+}
+
+const DefaultPublicAPIBaseURL = "http://127.0.0.1:8000"
+
+// EffectivePublicAPIBaseURL 按运行设置、配置文件、内置默认值的顺序解析公开地址。
+func (c FrontendConfig) EffectivePublicAPIBaseURL() string {
+	for _, value := range []string{c.PublicAPIBaseURLOverride, c.PublicAPIBaseURL} {
+		if value = strings.TrimRight(strings.TrimSpace(value), "/"); value != "" {
+			return value
+		}
+	}
+	return DefaultPublicAPIBaseURL
 }
 
 type DatabaseConfig struct {
@@ -102,20 +116,10 @@ type AuthConfig struct {
 }
 
 type ProviderConfig struct {
-	Build                 BuildProviderConfig         `yaml:"build"`
-	Web                   WebProviderConfig           `yaml:"web"`
-	Console               ConsoleProviderConfig       `yaml:"console"`
 	ProactiveUpstreamSync ProactiveUpstreamSyncConfig `yaml:"proactiveUpstreamSync"`
-}
-
-// ProactiveUpstreamSyncConfig controls optional upstream polling for billing/quota/models.
-// Defaults are all false (CLIProxy-style): only real inference traffic and on-demand token refresh.
-type ProactiveUpstreamSyncConfig struct {
-	Billing                   bool `yaml:"billing"`
-	WebQuota                  bool `yaml:"webQuota"`
-	ModelCatalogCatchup       bool `yaml:"modelCatalogCatchup"`
-	AllowManualBillingRefresh bool `yaml:"allowManualBillingRefresh"`
-	AllowManualQuotaRefresh   bool `yaml:"allowManualQuotaRefresh"`
+	Build   BuildProviderConfig   `yaml:"build"`
+	Web     WebProviderConfig     `yaml:"web"`
+	Console ConsoleProviderConfig `yaml:"console"`
 }
 
 type BuildProviderConfig struct {
@@ -169,6 +173,27 @@ type LocalMediaConfig struct {
 	Path string `yaml:"path"`
 }
 
+type ProactiveUpstreamSyncConfig struct {
+	Billing                   bool `yaml:"billing"`
+	WebQuota                  bool `yaml:"webQuota"`
+	ModelCatalogCatchup       bool `yaml:"modelCatalogCatchup"`
+	AllowManualBillingRefresh bool `yaml:"allowManualBillingRefresh"`
+	AllowManualQuotaRefresh   bool `yaml:"allowManualQuotaRefresh"`
+}
+
+type PromptCacheAffinityConfig struct {
+	// Enabled master switch (default true).
+	Enabled bool `yaml:"enabled"`
+	// Fingerprint derives ids from IP/User-Agent/client key when no session header is present.
+	Fingerprint bool `yaml:"fingerprint"`
+	// Expire enables TTL on fingerprint mappings; false keeps mappings until manual clear.
+	Expire bool `yaml:"expire"`
+	// TTL is the mapping lifetime when Expire is true (default 24h).
+	TTL Duration `yaml:"ttl"`
+}
+
+var DefaultRetryStatusCodes = []int{402, 403, 429, 503}
+
 type RoutingConfig struct {
 	StickyTTL    Duration `yaml:"stickyTTL"`
 	CooldownBase Duration `yaml:"cooldownBase"`
@@ -183,23 +208,6 @@ type RoutingConfig struct {
 	// PromptCacheAffinity stabilizes x-grok-conv-id for upstream prompt-cache hits.
 	PromptCacheAffinity PromptCacheAffinityConfig `yaml:"promptCacheAffinity"`
 }
-
-// PromptCacheAffinityConfig controls automatic conversation affinity ids.
-// When a client omits session headers, the gateway can map client-key+IP+UA to a
-// stable id stored in Redis/memory so multi-turn requests share prompt cache.
-type PromptCacheAffinityConfig struct {
-	// Enabled master switch (default true).
-	Enabled bool `yaml:"enabled"`
-	// Fingerprint derives ids from IP/User-Agent/client key when no session header is present.
-	Fingerprint bool `yaml:"fingerprint"`
-	// Expire enables TTL on fingerprint mappings; false keeps mappings until manual clear.
-	Expire bool `yaml:"expire"`
-	// TTL is the mapping lifetime when Expire is true (default 24h).
-	TTL Duration `yaml:"ttl"`
-}
-
-// DefaultRetryStatusCodes matches historical gateway behavior for account-scoped failover.
-var DefaultRetryStatusCodes = []int{402, 403, 429, 503}
 
 type AuditConfig struct {
 	BufferSize    int      `yaml:"bufferSize"`
@@ -286,6 +294,29 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+func resolveRelativePaths(cfg *Config, configPath string) error {
+	absoluteConfigPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("解析配置文件路径: %w", err)
+	}
+	baseDir := filepath.Dir(absoluteConfigPath)
+	if cfg.Database.Driver == "sqlite" {
+		path := strings.TrimSpace(cfg.Database.SQLite.Path)
+		if path != "" && !filepath.IsAbs(path) {
+			cfg.Database.SQLite.Path = filepath.Clean(filepath.Join(baseDir, path))
+		}
+	}
+	mediaPath := strings.TrimSpace(cfg.Media.Local.Path)
+	if mediaPath != "" && !filepath.IsAbs(mediaPath) {
+		cfg.Media.Local.Path = filepath.Clean(filepath.Join(baseDir, mediaPath))
+	}
+	staticPath := strings.TrimSpace(cfg.Frontend.StaticPath)
+	if staticPath != "" && !filepath.IsAbs(staticPath) {
+		cfg.Frontend.StaticPath = filepath.Clean(filepath.Join(baseDir, staticPath))
+	}
+	return nil
+}
+
 // NormalizeRoutingRetry fills defaults and deduplicates retry status codes.
 func NormalizeRoutingRetry(cfg *Config) {
 	if cfg == nil {
@@ -319,46 +350,6 @@ func validateRetryStatusCodes(codes []int) error {
 	return nil
 }
 
-// IsRetryableStatus reports whether an upstream status should trigger account failover.
-func IsRetryableStatus(status int, codes []int, retryServerErrors bool) bool {
-	if retryServerErrors && status >= 500 {
-		return true
-	}
-	if len(codes) == 0 {
-		codes = DefaultRetryStatusCodes
-	}
-	for _, code := range codes {
-		if status == code {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveRelativePaths(cfg *Config, configPath string) error {
-	absoluteConfigPath, err := filepath.Abs(configPath)
-	if err != nil {
-		return fmt.Errorf("解析配置文件路径: %w", err)
-	}
-	baseDir := filepath.Dir(absoluteConfigPath)
-	if cfg.Database.Driver == "sqlite" {
-		path := strings.TrimSpace(cfg.Database.SQLite.Path)
-		if path != "" && !filepath.IsAbs(path) {
-			cfg.Database.SQLite.Path = filepath.Clean(filepath.Join(baseDir, path))
-		}
-	}
-	mediaPath := strings.TrimSpace(cfg.Media.Local.Path)
-	if mediaPath != "" && !filepath.IsAbs(mediaPath) {
-		cfg.Media.Local.Path = filepath.Clean(filepath.Join(baseDir, mediaPath))
-	}
-	staticPath := strings.TrimSpace(cfg.Frontend.StaticPath)
-	if staticPath != "" && !filepath.IsAbs(staticPath) {
-		cfg.Frontend.StaticPath = filepath.Clean(filepath.Join(baseDir, staticPath))
-	}
-	return nil
-}
-
-// Validate 校验启动所需的安全配置和运行边界。
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return errors.New("server.listen 不能为空")
@@ -372,9 +363,22 @@ func (c Config) Validate() error {
 	if c.Server.RequestTimeout.Value() <= 0 || c.Server.RequestTimeout.Value() > maxRequestTimeout {
 		return errors.New("server.requestTimeout 必须大于零且不超过 24 小时")
 	}
-	publicAPIURL, err := url.ParseRequestURI(strings.TrimSpace(c.Frontend.PublicAPIBaseURL))
-	if err != nil || (publicAPIURL.Scheme != "http" && publicAPIURL.Scheme != "https") || publicAPIURL.Host == "" || publicAPIURL.User != nil || publicAPIURL.RawQuery != "" || publicAPIURL.Fragment != "" {
-		return errors.New("frontend.publicApiBaseURL 必须是不含凭据、查询参数和片段的 HTTP(S) URL")
+	if c.Server.MaxConcurrentRequests < 1 || c.Server.MaxConcurrentRequests > 100000 {
+		return errors.New("server.maxConcurrentRequests 必须在 1 到 100000 之间")
+	}
+	for _, item := range []struct {
+		name  string
+		value string
+	}{
+		{name: "frontend.publicApiBaseURL", value: c.Frontend.PublicAPIBaseURL},
+		{name: "frontend.publicApiBaseURL 运行设置", value: c.Frontend.PublicAPIBaseURLOverride},
+	} {
+		if publicBase := strings.TrimSpace(item.value); publicBase != "" {
+			publicAPIURL, err := url.ParseRequestURI(publicBase)
+			if err != nil || (publicAPIURL.Scheme != "http" && publicAPIURL.Scheme != "https") || publicAPIURL.Host == "" || publicAPIURL.User != nil || publicAPIURL.RawQuery != "" || publicAPIURL.Fragment != "" {
+				return fmt.Errorf("%s 必须是不含凭据、查询参数和片段的 HTTP(S) URL", item.name)
+			}
+		}
 	}
 	switch c.Database.Driver {
 	case "sqlite":
@@ -436,9 +440,6 @@ func (c Config) Validate() error {
 	if isExampleSecret(c.BootstrapAdmin.Password) {
 		return errors.New("bootstrapAdmin.password 不能使用示例占位值")
 	}
-	if publicAPIURL.Scheme == "https" && !c.Auth.SecureCookies {
-		return errors.New("HTTPS 公共地址必须启用 auth.secureCookies")
-	}
 	if c.Auth.AccessTokenTTL.Value() <= 0 || c.Auth.RefreshTokenTTL.Value() <= 0 {
 		return errors.New("JWT 有效期必须大于零")
 	}
@@ -497,13 +498,10 @@ func (c Config) Validate() error {
 		return errors.New("provider.web 恢复退避配置无效")
 	}
 	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL || c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown || c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > 5*time.Second || c.Routing.MaxAttempts < 1 || c.Routing.MaxAttempts > 10 {
-		return errors.New("routing 配置无效")
+		return fmt.Errorf("routing 参数无效")
 	}
 	if c.Routing.PromptCacheAffinity.TTL.Value() < 0 || c.Routing.PromptCacheAffinity.TTL.Value() > 30*24*time.Hour {
-		return errors.New("routing.promptCacheAffinity.ttl 必须在 0 到 720h 之间")
-	}
-	if err := validateRetryStatusCodes(c.Routing.RetryStatusCodes); err != nil {
-		return err
+		return errors.New("routing 配置无效")
 	}
 	if c.Audit.BufferSize < 1 || c.Audit.BufferSize > maxAuditBufferSize || c.Audit.BatchSize < 1 || c.Audit.BatchSize > maxAuditBatchSize || c.Audit.BatchSize > c.Audit.BufferSize || c.Audit.FlushInterval.Value() < minAuditFlushInterval || c.Audit.FlushInterval.Value() > maxAuditFlushInterval {
 		return errors.New("audit 队列和批量写入配置无效")
@@ -517,12 +515,13 @@ func (c Config) Validate() error {
 func defaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
-			Listen:         "127.0.0.1:8000",
-			MaxBodyBytes:   32 << 20,
-			ReadTimeout:    Duration(15 * time.Minute),
-			RequestTimeout: Duration(2 * time.Hour),
+			Listen:                "127.0.0.1:8000",
+			MaxBodyBytes:          32 << 20,
+			MaxConcurrentRequests: 1024,
+			ReadTimeout:           Duration(15 * time.Minute),
+			RequestTimeout:        Duration(2 * time.Hour),
 		},
-		Frontend: FrontendConfig{PublicAPIBaseURL: "http://127.0.0.1:8000", StaticPath: "./frontend/dist"},
+		Frontend: FrontendConfig{PublicAPIBaseURL: DefaultPublicAPIBaseURL, StaticPath: "./frontend/dist"},
 		Database: DatabaseConfig{
 			Driver:   "sqlite",
 			SQLite:   SQLiteDatabaseConfig{Path: "./data/backend.db"},
@@ -554,8 +553,6 @@ func defaultConfig() Config {
 				BaseURL: "https://console.x.ai", UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
 				ChatTimeout: Duration(5 * time.Minute),
 			},
-			// proactiveUpstreamSync defaults to all-false: no /billing or rate-limits polling.
-			ProactiveUpstreamSync: ProactiveUpstreamSyncConfig{},
 		},
 		Batch: BatchConfig{
 			ImportConcurrency: 25, ConversionConcurrency: 25, SyncConcurrency: 25,
@@ -567,15 +564,18 @@ func defaultConfig() Config {
 			Local: LocalMediaConfig{Path: "./data/media"},
 		},
 		Routing: RoutingConfig{
-			StickyTTL:         Duration(time.Hour),
-			CooldownBase:      Duration(30 * time.Second),
-			CooldownMax:       Duration(30 * time.Minute),
-			CapacityWait:      Duration(500 * time.Millisecond),
-			MaxAttempts:       3,
+			StickyTTL:    Duration(time.Hour),
+			CooldownBase: Duration(30 * time.Second),
+			CooldownMax:  Duration(30 * time.Minute),
+			CapacityWait: Duration(500 * time.Millisecond),
+			MaxAttempts:  3,
 			RetryStatusCodes:  append([]int(nil), DefaultRetryStatusCodes...),
 			RetryServerErrors: true,
 			PromptCacheAffinity: PromptCacheAffinityConfig{
-				Enabled: true, Fingerprint: true, Expire: true, TTL: Duration(24 * time.Hour),
+				Enabled:     true,
+				Fingerprint: true,
+				Expire:      true,
+				TTL:         Duration(24 * time.Hour),
 			},
 		},
 		Audit:             AuditConfig{BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond)},

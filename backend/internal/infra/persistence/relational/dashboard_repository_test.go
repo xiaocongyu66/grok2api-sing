@@ -62,9 +62,7 @@ func TestDashboardRepositorySnapshot(t *testing.T) {
 		}
 	}
 
-	boundaries := testDashboardBoundaries(now.Add(-24*time.Hour), 2*time.Hour, 12)
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, boundaries, now, dayStart, now, time.Minute)
+	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, testDashboardBoundaries(now.Add(-24*time.Hour), 2*time.Hour, 12), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,69 +89,6 @@ func TestDashboardRepositorySnapshot(t *testing.T) {
 	if len(snapshot.TopModels) != 2 || snapshot.TopModels[0].Model != "grok-primary" || snapshot.TopModels[0].Requests != 2 || snapshot.TopModels[0].Tokens != 110 {
 		t.Fatalf("top models = %#v", snapshot.TopModels)
 	}
-	// RPM/TPM share the selected period (24h → float averages, not rounded to zero).
-	if snapshot.LiveRates.WindowSeconds != 24*3600 {
-		t.Fatalf("liveRates window = %#v", snapshot.LiveRates)
-	}
-	// 3 / 1440 ≈ 0.00208 RPM; 160 / 1440 ≈ 0.111 TPM
-	if snapshot.LiveRates.RPM <= 0 || snapshot.LiveRates.RPM > 0.01 || snapshot.LiveRates.TPM <= 0 || snapshot.LiveRates.TPM > 0.2 {
-		t.Fatalf("liveRates = %#v", snapshot.LiveRates)
-	}
-	// Period totals match usage for the same [start, end) window.
-	if snapshot.Today.Requests != 3 || snapshot.Today.Tokens != 160 {
-		t.Fatalf("period totals = %#v", snapshot.Today)
-	}
-}
-
-func TestDashboardRepositoryLiveRatesWindow(t *testing.T) {
-	ctx := context.Background()
-	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "dashboard-live.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer database.Close()
-	if err := database.InitializeSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
-	rows := []requestAuditModel{
-		{RequestID: "live-1", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 100, CreatedAt: now.Add(-30 * time.Second)},
-		{RequestID: "live-2", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 50, CreatedAt: now.Add(-10 * time.Second)},
-		{RequestID: "old", ClientKeyID: 1, ModelRouteID: 1, ModelPublicID: "grok", Provider: "grok_build", Operation: "responses", UsageSource: "upstream", StatusCode: 200, TotalTokens: 999, CreatedAt: now.Add(-2 * time.Minute)},
-	}
-	if err := database.db.WithContext(ctx).Create(&rows).Error; err != nil {
-		t.Fatal(err)
-	}
-	// Short selected period (≤120s): RPM/TPM are raw counts for that window only.
-	shortBoundaries := []time.Time{now.Add(-60 * time.Second), now}
-	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, shortBoundaries, now, shortBoundaries[0], shortBoundaries[1], time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.LiveRates.RPM != 2 || snapshot.LiveRates.TPM != 150 || snapshot.LiveRates.WindowSeconds != 60 {
-		t.Fatalf("short liveRates = %#v", snapshot.LiveRates)
-	}
-	if snapshot.Today.Requests != 2 || snapshot.Today.Tokens != 150 {
-		t.Fatalf("short period totals = %#v", snapshot.Today)
-	}
-
-	// Longer selected period: averages per minute across the full range.
-	longBoundaries := testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24)
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	snapshot, err = NewDashboardRepository(database).Snapshot(ctx, longBoundaries, now, dayStart, now, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.LiveRates.WindowSeconds != 24*3600 {
-		t.Fatalf("long liveRates window = %#v", snapshot.LiveRates)
-	}
-	// 3 requests / 1440 minutes ≈ 0.002 RPM; 1149 tokens / 1440 ≈ 0.798 TPM (float, not rounded away).
-	if snapshot.LiveRates.RPM <= 0 || snapshot.LiveRates.RPM > 0.01 || snapshot.LiveRates.TPM < 0.7 || snapshot.LiveRates.TPM > 0.9 {
-		t.Fatalf("long liveRates = %#v", snapshot.LiveRates)
-	}
-	if snapshot.Today.Requests != 3 || snapshot.Today.Tokens != 1149 {
-		t.Fatalf("long period totals = %#v", snapshot.Today)
-	}
 }
 
 func TestDashboardRepositoryRanksTopModels(t *testing.T) {
@@ -175,9 +110,7 @@ func TestDashboardRepositoryRanksTopModels(t *testing.T) {
 	if err := database.db.WithContext(ctx).Create(&rows).Error; err != nil {
 		t.Fatal(err)
 	}
-	boundaries := testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24)
-	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, boundaries, now, dayStart, now, time.Minute)
+	snapshot, err := NewDashboardRepository(database).Snapshot(ctx, testDashboardBoundaries(now.Add(-24*time.Hour), time.Hour, 24), now)
 	if err != nil {
 		t.Fatal(err)
 	}

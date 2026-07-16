@@ -21,31 +21,20 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 }
 
 type settingsConfigDTO struct {
-	ProviderBuild         providerBuildConfigDTO         `json:"providerBuild"`
-	ProviderWeb           providerWebConfigDTO           `json:"providerWeb"`
-	ProviderConsole       providerConsoleConfigDTO       `json:"providerConsole"`
-	ProactiveUpstreamSync proactiveUpstreamSyncConfigDTO `json:"proactiveUpstreamSync"`
-	Batch                 batchConfigDTO                 `json:"batch"`
-	Media                 mediaConfigDTO                 `json:"media"`
-	Routing               routingConfigDTO               `json:"routing"`
-	PromptCacheAffinity   promptCacheAffinityConfigDTO   `json:"promptCacheAffinity"`
-	Audit                 auditConfigDTO                 `json:"audit"`
-	ClientKeyDefaults     clientKeyDefaultsConfigDTO     `json:"clientKeyDefaults"`
+	Server            serverConfigDTO            `json:"server"`
+	ProviderBuild     providerBuildConfigDTO     `json:"providerBuild"`
+	ProviderWeb       providerWebConfigDTO       `json:"providerWeb"`
+	ProviderConsole   providerConsoleConfigDTO   `json:"providerConsole"`
+	Batch             batchConfigDTO             `json:"batch"`
+	Media             mediaConfigDTO             `json:"media"`
+	Frontend          frontendConfigDTO          `json:"frontend"`
+	Routing           routingConfigDTO           `json:"routing"`
+	Audit             auditConfigDTO             `json:"audit"`
+	ClientKeyDefaults clientKeyDefaultsConfigDTO `json:"clientKeyDefaults"`
 }
 
-type promptCacheAffinityConfigDTO struct {
-	Enabled     bool   `json:"enabled"`
-	Fingerprint bool   `json:"fingerprint"`
-	Expire      bool   `json:"expire"`
-	TTL         string `json:"ttl"`
-}
-
-type proactiveUpstreamSyncConfigDTO struct {
-	Billing                   bool `json:"billing"`
-	WebQuota                  bool `json:"webQuota"`
-	ModelCatalogCatchup       bool `json:"modelCatalogCatchup"`
-	AllowManualBillingRefresh bool `json:"allowManualBillingRefresh"`
-	AllowManualQuotaRefresh   bool `json:"allowManualQuotaRefresh"`
+type serverConfigDTO struct {
+	MaxConcurrentRequests int `json:"maxConcurrentRequests"`
 }
 
 type providerConsoleConfigDTO struct {
@@ -59,6 +48,10 @@ type mediaConfigDTO struct {
 	MaxTotalBytes           int64  `json:"maxTotalBytes"`
 	CleanupThresholdPercent int    `json:"cleanupThresholdPercent"`
 	CleanupInterval         string `json:"cleanupInterval"`
+}
+
+type frontendConfigDTO struct {
+	PublicAPIBaseURL string `json:"publicApiBaseURL"`
 }
 
 type providerBuildConfigDTO struct {
@@ -95,13 +88,11 @@ type batchConfigDTO struct {
 }
 
 type routingConfigDTO struct {
-	StickyTTL         string `json:"stickyTTL"`
-	CooldownBase      string `json:"cooldownBase"`
-	CooldownMax       string `json:"cooldownMax"`
-	CapacityWait      string `json:"capacityWait"`
-	MaxAttempts       int    `json:"maxAttempts"`
-	RetryStatusCodes  []int  `json:"retryStatusCodes"`
-	RetryServerErrors bool   `json:"retryServerErrors"`
+	StickyTTL    string `json:"stickyTTL"`
+	CooldownBase string `json:"cooldownBase"`
+	CooldownMax  string `json:"cooldownMax"`
+	CapacityWait string `json:"capacityWait"`
+	MaxAttempts  int    `json:"maxAttempts"`
 }
 
 type auditConfigDTO struct {
@@ -161,6 +152,7 @@ func (h *Handler) update(c *gin.Context) {
 
 func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 	return settingsapp.EditableConfig{
+		Server: settingsapp.ServerConfig{MaxConcurrentRequests: value.Server.MaxConcurrentRequests},
 		ProviderBuild: settingsapp.ProviderBuildConfig{
 			BaseURL: value.ProviderBuild.BaseURL, ClientVersion: value.ProviderBuild.ClientVersion,
 			ClientIdentifier: value.ProviderBuild.ClientIdentifier, TokenAuth: value.ProviderBuild.TokenAuth,
@@ -188,27 +180,18 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			MaxImageBytes: value.Media.MaxImageBytes, MaxTotalBytes: value.Media.MaxTotalBytes,
 			CleanupThresholdPercent: value.Media.CleanupThresholdPercent, CleanupInterval: value.Media.CleanupInterval,
 		},
+		Frontend: settingsapp.FrontendConfig{
+			PublicAPIBaseURL: value.Frontend.PublicAPIBaseURL,
+		},
 		Routing: settingsapp.RoutingConfig{
 			StickyTTL: value.Routing.StickyTTL, CooldownBase: value.Routing.CooldownBase,
 			CooldownMax: value.Routing.CooldownMax, CapacityWait: value.Routing.CapacityWait, MaxAttempts: value.Routing.MaxAttempts,
-			RetryStatusCodes: append([]int(nil), value.Routing.RetryStatusCodes...), RetryServerErrors: value.Routing.RetryServerErrors,
 		},
 		Audit: settingsapp.AuditConfig{
 			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval,
 		},
 		ClientKeyDefaults: settingsapp.ClientKeyDefaultsConfig{
 			RPMLimit: value.ClientKeyDefaults.RPMLimit, MaxConcurrent: value.ClientKeyDefaults.MaxConcurrent,
-		},
-		ProactiveUpstreamSync: settingsapp.ProactiveUpstreamSyncConfig{
-			Billing:                   value.ProactiveUpstreamSync.Billing,
-			WebQuota:                  value.ProactiveUpstreamSync.WebQuota,
-			ModelCatalogCatchup:       value.ProactiveUpstreamSync.ModelCatalogCatchup,
-			AllowManualBillingRefresh: value.ProactiveUpstreamSync.AllowManualBillingRefresh,
-			AllowManualQuotaRefresh:   value.ProactiveUpstreamSync.AllowManualQuotaRefresh,
-		},
-		PromptCacheAffinity: settingsapp.PromptCacheAffinityConfig{
-			Enabled: value.PromptCacheAffinity.Enabled, Fingerprint: value.PromptCacheAffinity.Fingerprint,
-			Expire: value.PromptCacheAffinity.Expire, TTL: value.PromptCacheAffinity.TTL,
 		},
 	}
 }
@@ -217,6 +200,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 	config := value.Config
 	return settingsResponse{
 		Config: settingsConfigDTO{
+			Server: serverConfigDTO{MaxConcurrentRequests: config.Server.MaxConcurrentRequests},
 			ProviderBuild: providerBuildConfigDTO{
 				BaseURL: config.ProviderBuild.BaseURL, ClientVersion: config.ProviderBuild.ClientVersion,
 				ClientIdentifier: config.ProviderBuild.ClientIdentifier, TokenAuthConfigured: strings.TrimSpace(config.ProviderBuild.TokenAuth) != "",
@@ -244,27 +228,18 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				MaxImageBytes: config.Media.MaxImageBytes, MaxTotalBytes: config.Media.MaxTotalBytes,
 				CleanupThresholdPercent: config.Media.CleanupThresholdPercent, CleanupInterval: config.Media.CleanupInterval,
 			},
+			Frontend: frontendConfigDTO{
+				PublicAPIBaseURL: config.Frontend.PublicAPIBaseURL,
+			},
 			Routing: routingConfigDTO{
 				StickyTTL: config.Routing.StickyTTL, CooldownBase: config.Routing.CooldownBase,
 				CooldownMax: config.Routing.CooldownMax, CapacityWait: config.Routing.CapacityWait, MaxAttempts: config.Routing.MaxAttempts,
-				RetryStatusCodes: append([]int(nil), config.Routing.RetryStatusCodes...), RetryServerErrors: config.Routing.RetryServerErrors,
 			},
 			Audit: auditConfigDTO{
 				BufferSize: config.Audit.BufferSize, BatchSize: config.Audit.BatchSize, FlushInterval: config.Audit.FlushInterval,
 			},
 			ClientKeyDefaults: clientKeyDefaultsConfigDTO{
 				RPMLimit: config.ClientKeyDefaults.RPMLimit, MaxConcurrent: config.ClientKeyDefaults.MaxConcurrent,
-			},
-			PromptCacheAffinity: promptCacheAffinityConfigDTO{
-				Enabled: config.PromptCacheAffinity.Enabled, Fingerprint: config.PromptCacheAffinity.Fingerprint,
-				Expire: config.PromptCacheAffinity.Expire, TTL: config.PromptCacheAffinity.TTL,
-			},
-			ProactiveUpstreamSync: proactiveUpstreamSyncConfigDTO{
-				Billing:                   config.ProactiveUpstreamSync.Billing,
-				WebQuota:                  config.ProactiveUpstreamSync.WebQuota,
-				ModelCatalogCatchup:       config.ProactiveUpstreamSync.ModelCatalogCatchup,
-				AllowManualBillingRefresh: config.ProactiveUpstreamSync.AllowManualBillingRefresh,
-				AllowManualQuotaRefresh:   config.ProactiveUpstreamSync.AllowManualQuotaRefresh,
 			},
 		},
 		RecommendedProviderBuild: providerBuildRecommendationDTO{

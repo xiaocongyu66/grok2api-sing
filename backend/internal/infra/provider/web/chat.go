@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
@@ -22,7 +23,6 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
-	"github.com/chenyme/grok2api/backend/internal/pkg/tokencount"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -82,12 +82,12 @@ type parsedChat struct {
 	cardCache      map[string]map[string]any
 	citationIndex  map[string]int
 	lastCitation   int
-	ServerTools   int64
-	InputTokens   int64
-	ToolCalls     []parsedToolCall
-	Tools         []any
-	ToolChoice    any
-	ParallelTools bool
+	ServerTools    int64
+	InputTokens    int64
+	ToolCalls      []parsedToolCall
+	Tools          []any
+	ToolChoice     any
+	ParallelTools  bool
 }
 
 func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
@@ -165,6 +165,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			}
 			return &provider.Response{
 				StatusCode: upstream.StatusCode, Status: upstream.Status, Header: http.Header(upstream.Header),
+				UpstreamURL: upstream.Request.URL.String(),
 				Body: &releaseBody{ReadCloser: upstream.Body, release: func() {
 					a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
 					lease.Release()
@@ -210,9 +211,6 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		parsed = currentParsed
 		break
 	}
-	// Web has no official usage or prompt-cache meters. Only estimate input/output text
-	// tokens; cached_tokens stay 0 (never invent cache hits).
-	_ = previous
 	parsed.InputTokens = estimateTokens(normalized.Prompt)
 	parsed.Tools = tools.ResponseTools
 	parsed.ToolChoice = tools.ResponseChoice
@@ -1164,8 +1162,7 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		value := map[string]any{
 			"id": strings.Replace(responseID, "resp_", "chatcmpl_", 1), "object": "chat.completion", "created": created, "model": model,
 			"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason}},
-			// No real prompt-cache meter on Web: omit fake cached_tokens.
-			"usage": map[string]any{"prompt_tokens": inputTokens, "completion_tokens": outputTokens, "total_tokens": inputTokens + outputTokens},
+			"usage":   map[string]any{"prompt_tokens": inputTokens, "completion_tokens": outputTokens, "total_tokens": inputTokens + outputTokens},
 		}
 		if len(parsed.SearchSources) > 0 {
 			value["search_sources"] = parsed.SearchSources
@@ -1174,7 +1171,7 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 	}
 	if operation == conversation.OperationMessages {
 		visibleText, stopSequence := applyWebStopSequences(parsed.Text.String(), options.StopSequences)
-		content := make([]any, 0, len(parsed.ToolCalls)+2)
+		content := make([]any, 0, len(parsed.ToolCalls))
 		if options.AnthropicThinking && parsed.Reasoning.Len() > 0 {
 			content = append(content, map[string]any{"type": "thinking", "thinking": parsed.Reasoning.String()})
 		}
@@ -1234,7 +1231,6 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 		"output": output, "parallel_tool_calls": parsed.ParallelTools, "tools": tools, "tool_choice": toolChoice, "store": true,
 		"usage": map[string]any{
 			"input_tokens": inputTokens, "output_tokens": outputTokens, "total_tokens": inputTokens + outputTokens,
-			// Real prompt-cache only comes from Build/Console upstream; Web reports 0.
 			"input_tokens_details":  map[string]any{"cached_tokens": 0},
 			"output_tokens_details": map[string]any{"reasoning_tokens": estimateTokens(parsed.Reasoning.String())},
 			"num_sources_used":      int64(len(parsed.SearchSources)), "num_server_side_tools_used": parsed.ServerTools,
@@ -1745,7 +1741,11 @@ func writeSSE(writer io.Writer, event string, value any) error {
 }
 
 func estimateTokens(value string) int64 {
-	return tokencount.EstimateText(value)
+	count := utf8.RuneCountInString(value)
+	if count == 0 {
+		return 0
+	}
+	return int64((count + 3) / 4)
 }
 
 func newWebID(prefix string) string {

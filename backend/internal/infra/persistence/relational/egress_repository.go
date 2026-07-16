@@ -2,8 +2,6 @@ package relational
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -16,12 +14,7 @@ func NewEgressRepository(db *Database) *EgressRepository { return &EgressReposit
 func (r *EgressRepository) ListEgressNodes(ctx context.Context, scope egress.Scope, sort repository.SortQuery) ([]egress.Node, error) {
 	query := r.db.db.WithContext(ctx).Model(&egressNodeModel{})
 	if scope != "" {
-		// scope column may be multi-value: "grok_web" or "grok_web,grok_build".
-		s := string(scope)
-		query = query.Where(
-			"scope = ? OR scope LIKE ? OR scope LIKE ? OR scope LIKE ?",
-			s, s+",%", "%,"+s+",%", "%,"+s,
-		)
+		query = query.Where("scope = ?", scope)
 	}
 	var rows []egressNodeModel
 	query = applyStableSort(query, sort, map[string]sortSpec{
@@ -50,9 +43,6 @@ func (r *EgressRepository) GetEgressNode(ctx context.Context, id uint64) (egress
 }
 
 func (r *EgressRepository) CreateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error) {
-	if err := validateEgressNodeScopes(value); err != nil {
-		return egress.Node{}, err
-	}
 	row := fromEgressDomain(value)
 	if err := r.db.db.WithContext(ctx).Create(&row).Error; err != nil {
 		return egress.Node{}, mapError(err)
@@ -61,9 +51,6 @@ func (r *EgressRepository) CreateEgressNode(ctx context.Context, value egress.No
 }
 
 func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error) {
-	if err := validateEgressNodeScopes(value); err != nil {
-		return egress.Node{}, err
-	}
 	row := fromEgressDomain(value)
 	result := r.db.db.WithContext(ctx).Save(&row)
 	if result.Error != nil {
@@ -73,30 +60,6 @@ func (r *EgressRepository) UpdateEgressNode(ctx context.Context, value egress.No
 		return egress.Node{}, repository.ErrNotFound
 	}
 	return toEgressDomain(row), nil
-}
-
-func validateEgressNodeScopes(value egress.Node) error {
-	// Reject legacy "all" and any other non-provider scope at the repository boundary.
-	// Multi-scope is stored as comma-separated values; each segment must be valid.
-	scopes := value.EffectiveScopes()
-	if len(scopes) == 0 {
-		// Also catch raw Scope="all" when Scopes is empty and Scope is not a valid enum.
-		raw := strings.TrimSpace(string(value.Scope))
-		if raw == "" {
-			return fmt.Errorf("egress scope is required")
-		}
-		if parsed := parseStoredScopes(raw); len(parsed) > 0 {
-			scopes = parsed
-		} else {
-			return fmt.Errorf("invalid egress scope %q", raw)
-		}
-	}
-	for _, scope := range scopes {
-		if !scope.IsValid() {
-			return fmt.Errorf("invalid egress scope %q", scope)
-		}
-	}
-	return nil
 }
 
 func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) error {
@@ -111,13 +74,8 @@ func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) erro
 }
 
 func toEgressDomain(row egressNodeModel) egress.Node {
-	scopes := parseStoredScopes(row.Scope)
-	primary := egress.Scope("")
-	if len(scopes) > 0 {
-		primary = scopes[0]
-	}
 	return egress.Node{
-		ID: row.ID, Name: row.Name, Scope: primary, Scopes: scopes, Enabled: row.Enabled,
+		ID: row.ID, Name: row.Name, Scope: egress.Scope(row.Scope), Enabled: row.Enabled,
 		EncryptedProxyURL: row.EncryptedProxyURL, UserAgent: row.UserAgent, EncryptedCloudflareCookie: row.EncryptedCloudflareCookie,
 		Health: row.Health, FailureCount: row.FailureCount, CooldownUntil: row.CooldownUntil, LastError: row.LastError,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
@@ -130,49 +88,9 @@ func fromEgressDomain(value egress.Node) egressNodeModel {
 		health = 1
 	}
 	return egressNodeModel{
-		ID: value.ID, Name: value.Name, Scope: encodeStoredScopes(value.EffectiveScopes()), Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
 		EncryptedProxyURL: value.EncryptedProxyURL, UserAgent: value.UserAgent, EncryptedCloudflareCookie: value.EncryptedCloudflareCookie,
 		Health: health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
-}
-
-func parseStoredScopes(raw string) []egress.Scope {
-	parts := strings.Split(raw, ",")
-	out := make([]egress.Scope, 0, len(parts))
-	seen := make(map[egress.Scope]struct{}, len(parts))
-	for _, part := range parts {
-		scope := egress.Scope(strings.TrimSpace(part))
-		if !scope.IsValid() {
-			continue
-		}
-		if _, ok := seen[scope]; ok {
-			continue
-		}
-		seen[scope] = struct{}{}
-		out = append(out, scope)
-	}
-	return out
-}
-
-func encodeStoredScopes(scopes []egress.Scope) string {
-	if len(scopes) == 0 {
-		return string(egress.ScopeBuild)
-	}
-	parts := make([]string, 0, len(scopes))
-	seen := make(map[egress.Scope]struct{}, len(scopes))
-	for _, scope := range scopes {
-		if !scope.IsValid() {
-			continue
-		}
-		if _, ok := seen[scope]; ok {
-			continue
-		}
-		seen[scope] = struct{}{}
-		parts = append(parts, string(scope))
-	}
-	if len(parts) == 0 {
-		return string(egress.ScopeBuild)
-	}
-	return strings.Join(parts, ",")
 }

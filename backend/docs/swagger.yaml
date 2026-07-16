@@ -266,7 +266,7 @@ paths:
       summary: 获取归档图片
       tags:
       - Images
-  /Anthropic/messages:
+  /v1/messages:
     post:
       consumes:
       - application/json

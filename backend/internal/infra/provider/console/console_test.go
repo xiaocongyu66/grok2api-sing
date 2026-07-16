@@ -125,13 +125,6 @@ func TestConsoleImportAcceptsJSONPlainTextAndCookieFormat(t *testing.T) {
 	if len(values) != 1 || values[0].Provider != account.ProviderConsole || values[0].AuthType != account.AuthTypeSSO || values[0].Name != "console-a" || values[0].AccessToken != "token-a" {
 		t.Fatalf("json values = %#v", values)
 	}
-	values, err = parseImportedCredentials([]byte("a@b.com:eyJtoken.one\nb@c.com:token-two\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values) != 2 || values[0].Email != "a@b.com" || values[0].AccessToken != "eyJtoken.one" || values[1].Email != "b@c.com" {
-		t.Fatalf("email:token values = %#v", values)
-	}
 }
 
 func TestConsoleRetryAfterParsesCompoundDuration(t *testing.T) {
@@ -245,7 +238,7 @@ func newConsoleTestAdapter(t *testing.T, baseURL string) (*Adapter, account.Cred
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter := NewAdapter(Config{BaseURL: baseURL}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher)
+	adapter := NewAdapter(Config{BaseURL: baseURL, UserAgent: "console-test", TimeoutSeconds: 5}, infraegress.NewManager(consoleEgressRepositoryStub{}, cipher), cipher)
 	credential := account.Credential{ID: 1, Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, EncryptedAccessToken: encrypted}
 	return adapter, credential
 }

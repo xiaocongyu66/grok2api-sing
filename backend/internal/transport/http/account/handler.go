@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,7 +32,9 @@ type accountSyncProgressor interface {
 const (
 	maxAccountImportBytes         = 30 << 20
 	maxAccountImportFiles         = 1000
-	accountSyncQueueCapacity      = 20
+	// Buffer enough imported account IDs so DB write chunks are not blocked on
+	// slow proactive billing/quota/model sync workers (CPA default: sync off).
+	accountSyncQueueCapacity      = 256
 	accountEventHeartbeatInterval = 15 * time.Second
 	accountEventWriteTimeout      = 30 * time.Second
 )
@@ -143,9 +144,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/refresh-billing", h.refreshAllBilling)
 	router.POST("/accounts/refresh-tokens", h.refreshAllTokens)
 	router.POST("/accounts/batch/refresh-billing", h.batchRefreshBilling)
-	router.POST("/accounts/batch/validate", h.batchValidate)
-	router.POST("/accounts/batch/dedup-sso-email", h.dedupSSOEmail)
-	router.DELETE("/accounts/failed", h.deleteFailed)
+	router.POST("/accounts/batch/refresh-quotas", h.batchRefreshQuotas)
 	router.PATCH("/accounts/batch", h.batchUpdate)
 	router.DELETE("/accounts", h.batchDelete)
 	router.PATCH("/accounts/:id", h.update)
@@ -177,48 +176,16 @@ type batchDeleteRequest struct {
 	Provider string   `json:"provider" binding:"required"`
 }
 
-type deleteFailedRequest struct {
-	Provider        string `json:"provider" binding:"required"`
-	IncludeDisabled bool   `json:"includeDisabled"`
+type buildConversionRequest struct {
+	IDs      []string                           `json:"ids"`
+	All      bool                               `json:"all"`
+	Strategy accountapp.BuildConversionStrategy `json:"strategy"`
 }
 
-type batchValidateRequest struct {
-	IDs       []string `json:"ids"`
-	Provider  string   `json:"provider" binding:"required"`
-	All       bool     `json:"all"`
-	Preselect bool     `json:"preselect"`
-	// Limit is the preselect sample size (default 5). If fewer accounts remain, all are tested.
-	Limit int `json:"limit"`
-}
-
-type dedupSSOEmailRequest struct {
-	Provider string `json:"provider" binding:"required"`
-}
-
-type dedupSSOEmailResponse struct {
-	Groups          int `json:"groups"`
-	Probed          int `json:"probed"`
-	Kept            int `json:"kept"`
-	Deleted         int `json:"deleted"`
-	KeptRateLimited int `json:"keptRateLimited"`
-	SkippedNoEmail  int `json:"skippedNoEmail"`
-	Single          int `json:"single"`
-}
-
-type accountSelectionRequest struct {
-	IDs []string `json:"ids"`
-	All bool     `json:"all"`
-}
-
-type accountValidateResponse struct {
-	Total       int      `json:"total"`
-	Healthy     int      `json:"healthy"`
-	Failed      int      `json:"failed"`
-	Skipped     int      `json:"skipped"`
-	Marked      int      `json:"marked"`
-	Preselected int      `json:"preselected,omitempty"`
-	PoolSize    int      `json:"poolSize,omitempty"`
-	SampledIDs  []string `json:"sampledIds,omitempty"`
+type webConsoleSyncRequest struct {
+	IDs      []string                          `json:"ids"`
+	All      bool                              `json:"all"`
+	Strategy accountapp.WebConsoleSyncStrategy `json:"strategy"`
 }
 
 type buildConversionResponse struct {
@@ -250,6 +217,7 @@ type accountTokenRefreshResponse struct {
 type accountImportResponse struct {
 	Created    int `json:"created"`
 	Updated    int `json:"updated"`
+	Skipped    int `json:"skipped"`
 	Synced     int `json:"synced"`
 	SyncFailed int `json:"syncFailed"`
 }
@@ -387,18 +355,9 @@ func (h *Handler) summary(c *gin.Context) {
 	response.Success(c, http.StatusOK, gin.H{
 		"total": value.Total, "available": value.Available, "recovering": value.Recovering, "attention": value.Attention,
 		"providers": gin.H{
-			string(accountdomain.ProviderBuild): gin.H{
-				"total": build.Total, "available": build.Available,
-				"reauthRequired": build.ReauthRequired, "disabled": build.Disabled,
-			},
-			string(accountdomain.ProviderWeb): gin.H{
-				"total": web.Total, "available": web.Available,
-				"reauthRequired": web.ReauthRequired, "disabled": web.Disabled,
-			},
-			string(accountdomain.ProviderConsole): gin.H{
-				"total": console.Total, "available": console.Available,
-				"reauthRequired": console.ReauthRequired, "disabled": console.Disabled,
-			},
+			string(accountdomain.ProviderBuild):   gin.H{"total": build.Total, "available": build.Available},
+			string(accountdomain.ProviderWeb):     gin.H{"total": web.Total, "available": web.Available},
+			string(accountdomain.ProviderConsole): gin.H{"total": console.Total, "available": console.Available},
 		},
 		"recovery": gin.H{"cooldown": value.Recovery.Cooldown, "waitingReset": value.Recovery.WaitingReset, "probing": value.Recovery.Probing},
 		"issues":   gin.H{"disabled": value.Issues.Disabled, "reauthRequired": value.Issues.ReauthRequired},
@@ -449,115 +408,6 @@ func (h *Handler) batchDelete(c *gin.Context) {
 	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
 }
 
-func (h *Handler) deleteFailed(c *gin.Context) {
-	var request deleteFailedRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
-		return
-	}
-	providerValue := accountdomain.Provider(request.Provider)
-	if !providerValue.IsValid() {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
-		return
-	}
-	deleted, err := h.service.DeleteFailedAccounts(c.Request.Context(), providerValue, request.IncludeDisabled)
-	if err != nil {
-		h.writeServiceError(c, "accountDeleteFailed", err, http.StatusInternalServerError, "删除失败账号失败")
-		return
-	}
-	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
-}
-
-func (h *Handler) dedupSSOEmail(c *gin.Context) {
-	var request dedupSSOEmailRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
-		return
-	}
-	providerValue := accountdomain.Provider(request.Provider)
-	if !providerValue.IsValid() {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
-		return
-	}
-	stream := newAccountEventStream(c)
-	defer stream.Close()
-	result, err := h.service.DeduplicateSSOByEmail(c.Request.Context(), providerValue, stream.ProgressObserver())
-	if err != nil {
-		stream.WriteError("accountDedupFailed", err.Error())
-		return
-	}
-	_ = stream.Write("complete", dedupSSOEmailResponse{
-		Groups: result.Groups, Probed: result.Probed, Kept: result.Kept, Deleted: result.Deleted,
-		KeptRateLimited: result.KeptRateLimited, SkippedNoEmail: result.SkippedNoEmail, Single: result.Single,
-	})
-}
-
-func (h *Handler) batchValidate(c *gin.Context) {
-	var request batchValidateRequest
-	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
-		return
-	}
-	modes := 0
-	if request.All {
-		modes++
-	}
-	if request.Preselect {
-		modes++
-	}
-	if len(request.IDs) > 0 {
-		modes++
-	}
-	if modes != 1 {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请只选择：指定账号、全部验证或预选测号 其中一种")
-		return
-	}
-	providerValue := accountdomain.Provider(request.Provider)
-	if !providerValue.IsValid() {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
-		return
-	}
-	stream := newAccountEventStream(c)
-	defer stream.Close()
-	var (
-		result accountapp.AccountValidationResult
-		err    error
-	)
-	switch {
-	case request.All:
-		result, err = h.service.ValidateAllEnabledAccounts(c.Request.Context(), providerValue, stream.ProgressObserver())
-	case request.Preselect:
-		result, err = h.service.ValidatePreselectedAccounts(c.Request.Context(), providerValue, request.Limit, stream.ProgressObserver())
-	default:
-		ids, parseErr := parseIDs(request.IDs)
-		if parseErr != nil {
-			stream.WriteError("invalidId", parseErr.Error())
-			return
-		}
-		if !h.validateProviderIDs(c, ids, request.Provider) {
-			return
-		}
-		result, err = h.service.ValidateAccounts(c.Request.Context(), ids, stream.ProgressObserver())
-		if err == nil {
-			result.Preselected = len(ids)
-			result.PoolSize = len(ids)
-			result.SampledIDs = append([]uint64(nil), ids...)
-		}
-	}
-	if err != nil {
-		stream.WriteError("accountValidateFailed", "批量验证账号失败")
-		return
-	}
-	sampled := make([]string, 0, len(result.SampledIDs))
-	for _, id := range result.SampledIDs {
-		sampled = append(sampled, strconv.FormatUint(id, 10))
-	}
-	_ = stream.Write("complete", accountValidateResponse{
-		Total: result.Total, Healthy: result.Healthy, Failed: result.Failed, Skipped: result.Skipped, Marked: result.Marked,
-		Preselected: result.Preselected, PoolSize: result.PoolSize, SampledIDs: sampled,
-	})
-}
-
 func (h *Handler) batchRefreshBilling(c *gin.Context) {
 	var request batchDeleteRequest
 	if c.ShouldBindJSON(&request) != nil {
@@ -569,16 +419,48 @@ func (h *Handler) batchRefreshBilling(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 		return
 	}
-	if request.Provider != string(accountdomain.ProviderBuild) || !h.validateProviderIDs(c, ids, request.Provider) {
-		if request.Provider != string(accountdomain.ProviderBuild) {
-			response.Error(c, http.StatusBadRequest, "invalidProvider", "Grok Web 账号不支持 Billing 批量同步")
-		}
+	if request.Provider != string(accountdomain.ProviderBuild) {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "仅 Grok Build 账号支持 Billing 同步")
 		return
 	}
-	ctx := accountapp.WithSyncSource(c.Request.Context(), accountapp.SyncSourceManual)
-	succeeded, failed, err := h.service.BatchRefreshBilling(ctx, ids)
+	if !h.validateProviderIDs(c, ids, request.Provider) {
+		return
+	}
+	succeeded, failed, err := h.service.BatchRefreshBilling(c.Request.Context(), ids)
 	if err != nil {
-		h.writeServiceError(c, "billingBatchRefreshFailed", err, http.StatusBadGateway, "批量同步账号额度失败")
+		h.writeServiceError(c, "billingBatchRefreshFailed", err, http.StatusBadGateway, "批量同步 Billing 失败")
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
+}
+
+func (h *Handler) batchRefreshQuotas(c *gin.Context) {
+	var request batchDeleteRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	ids, err := parseIDs(request.IDs)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
+		return
+	}
+	providerValue := accountdomain.Provider(request.Provider)
+	if !providerValue.IsValid() {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "账号来源无效")
+		return
+	}
+	if !h.validateProviderIDs(c, ids, request.Provider) {
+		return
+	}
+	var succeeded, failed int
+	if providerValue == accountdomain.ProviderBuild {
+		succeeded, failed, err = h.service.BatchRefreshBilling(c.Request.Context(), ids)
+	} else {
+		succeeded, failed, err = h.service.BatchRefreshQuota(c.Request.Context(), ids)
+	}
+	if err != nil {
+		h.writeServiceError(c, "quotaBatchRefreshFailed", err, http.StatusBadGateway, "批量同步账号额度失败")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
@@ -648,7 +530,7 @@ func (h *Handler) importConsoleAuth(c *gin.Context) {
 }
 
 func (h *Handler) convertWebToBuild(c *gin.Context) {
-	var request accountSelectionRequest
+	var request buildConversionRequest
 	if c.ShouldBindJSON(&request) != nil {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "转换请求无效")
 		return
@@ -657,6 +539,13 @@ func (h *Handler) convertWebToBuild(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "全部转换与指定账号不能同时提交")
 		return
 	}
+	if request.Strategy == "" {
+		request.Strategy = accountapp.BuildConversionMissing
+	}
+	if request.Strategy != accountapp.BuildConversionAll && request.Strategy != accountapp.BuildConversionMissing {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "转换策略无效")
+		return
+	}
 	var ids []uint64
 	if !request.All {
 		var err error
@@ -665,12 +554,15 @@ func (h *Handler) convertWebToBuild(c *gin.Context) {
 			response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 			return
 		}
+		if !h.validateProviderIDs(c, ids, string(accountdomain.ProviderWeb)) {
+			return
+		}
 	}
-	h.streamWebToBuildConversion(c, request.All, ids)
+	h.streamWebToBuildConversion(c, request.All, ids, request.Strategy)
 }
 
 func (h *Handler) syncWebToConsole(c *gin.Context) {
-	var request accountSelectionRequest
+	var request webConsoleSyncRequest
 	if c.ShouldBindJSON(&request) != nil {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "同步请求无效")
 		return
@@ -679,6 +571,13 @@ func (h *Handler) syncWebToConsole(c *gin.Context) {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "全部同步与指定账号不能同时提交")
 		return
 	}
+	if request.Strategy == "" {
+		request.Strategy = accountapp.WebConsoleSyncAll
+	}
+	if request.Strategy != accountapp.WebConsoleSyncAll && request.Strategy != accountapp.WebConsoleSyncMissing {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "同步策略无效")
+		return
+	}
 	var ids []uint64
 	if !request.All {
 		var err error
@@ -687,94 +586,65 @@ func (h *Handler) syncWebToConsole(c *gin.Context) {
 			response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
 			return
 		}
+		if !h.validateProviderIDs(c, ids, string(accountdomain.ProviderWeb)) {
+			return
+		}
 	}
-	h.streamWebToConsoleSync(c, request.All, ids)
+	h.streamWebToConsoleSync(c, request.All, ids, request.Strategy)
 }
 
-func (h *Handler) runWebToConsoleSync(ctx context.Context, all bool, ids []uint64, progress accountapp.BatchProgressObserver, syncProgress func(completed, total int)) (accountapp.ImportResult, accountsyncapp.Result, error) {
+func (h *Handler) runWebToConsoleSync(ctx context.Context, all bool, ids []uint64, strategy accountapp.WebConsoleSyncStrategy, progress accountapp.BatchProgressObserver, syncProgress func(completed, total int)) (accountapp.ImportResult, accountsyncapp.Result, error) {
 	pipeline := h.startSyncPipeline(ctx, syncProgress)
 	var (
 		result accountapp.ImportResult
 		err    error
 	)
 	if all {
-		result, err = h.service.SyncAllWebAccountsToConsoleWithProgress(pipeline.ctx, pipeline.Observe, progress)
+		result, err = h.service.SyncAllWebAccountsToConsoleWithStrategy(pipeline.ctx, strategy, pipeline.Observe, progress)
 	} else {
-		result, err = h.service.SyncWebAccountsToConsoleWithProgress(pipeline.ctx, ids, pipeline.Observe, progress)
+		result, err = h.service.SyncWebAccountsToConsoleWithStrategy(pipeline.ctx, ids, strategy, pipeline.Observe, progress)
 	}
 	syncResult := pipeline.Finish(err != nil)
 	return result, syncResult, err
 }
 
-func (h *Handler) streamWebToConsoleSync(c *gin.Context, all bool, ids []uint64) {
+func (h *Handler) streamWebToConsoleSync(c *gin.Context, all bool, ids []uint64, strategy accountapp.WebConsoleSyncStrategy) {
 	stream := newAccountEventStream(c)
 	defer stream.Close()
 	var total atomic.Int64
-	result, syncResult, err := h.runWebToConsoleSync(c.Request.Context(), all, ids, stream.PhaseProgressObserver("importing", &total), stream.SyncProgressObserver())
+	result, syncResult, err := h.runWebToConsoleSync(c.Request.Context(), all, ids, strategy, stream.PhaseProgressObserver("importing", &total), stream.SyncProgressObserver())
 	if err != nil {
-		stream.WriteError(accountStreamErrorCode(err, "accountConsoleSyncFailed"), accountStreamErrorMessage(err, "Grok Web 账号同步到 Console 失败"))
+		stream.WriteError("accountConsoleSyncFailed", "Grok Web 账号同步到 Console 失败")
 		return
 	}
-	_ = stream.Write("complete", accountImportResponse{Created: result.Created, Updated: result.Updated, Synced: syncResult.Succeeded, SyncFailed: syncResult.Failed})
+	_ = stream.Write("complete", accountImportResponse{Created: result.Created, Updated: result.Updated, Skipped: result.Skipped, Synced: syncResult.Succeeded, SyncFailed: syncResult.Failed})
 }
 
-func (h *Handler) runWebToBuildConversion(ctx context.Context, all bool, ids []uint64, progress accountapp.BatchProgressObserver, syncProgress func(completed, total int)) (accountapp.BuildConversionResult, accountsyncapp.Result, error) {
+func (h *Handler) runWebToBuildConversion(ctx context.Context, all bool, ids []uint64, strategy accountapp.BuildConversionStrategy, progress accountapp.BatchProgressObserver, syncProgress func(completed, total int)) (accountapp.BuildConversionResult, accountsyncapp.Result, error) {
 	pipeline := h.startSyncPipeline(ctx, syncProgress)
 	var (
 		result accountapp.BuildConversionResult
 		err    error
 	)
 	if all {
-		result, err = h.service.ConvertAllWebAccountsToBuildWithProgress(pipeline.ctx, pipeline.Observe, progress)
+		result, err = h.service.ConvertAllWebAccountsToBuildWithStrategy(pipeline.ctx, strategy, pipeline.Observe, progress)
 	} else {
-		result, err = h.service.ConvertWebAccountsToBuildWithProgress(pipeline.ctx, ids, pipeline.Observe, progress)
+		result, err = h.service.ConvertWebAccountsToBuildWithStrategy(pipeline.ctx, ids, strategy, pipeline.Observe, progress)
 	}
 	syncResult := pipeline.Finish(err != nil)
 	return result, syncResult, err
 }
 
-func (h *Handler) streamWebToBuildConversion(c *gin.Context, all bool, ids []uint64) {
+func (h *Handler) streamWebToBuildConversion(c *gin.Context, all bool, ids []uint64, strategy accountapp.BuildConversionStrategy) {
 	stream := newAccountEventStream(c)
 	defer stream.Close()
 	var total atomic.Int64
-	result, syncResult, err := h.runWebToBuildConversion(c.Request.Context(), all, ids, stream.PhaseProgressObserver("converting", &total), stream.SyncProgressObserver())
+	result, syncResult, err := h.runWebToBuildConversion(c.Request.Context(), all, ids, strategy, stream.PhaseProgressObserver("converting", &total), stream.SyncProgressObserver())
 	if err != nil {
-		stream.WriteError(accountStreamErrorCode(err, "accountConversionFailed"), accountStreamErrorMessage(err, "Grok Web 账号转换失败"))
+		stream.WriteError("accountConversionFailed", "Grok Web 账号转换失败")
 		return
 	}
 	_ = stream.Write("complete", newBuildConversionResponse(result, syncResult))
-}
-
-func accountStreamErrorCode(err error, fallback string) string {
-	switch {
-	case errors.Is(err, accountapp.ErrInvalidInput), errors.Is(err, accountapp.ErrInvalidImport):
-		return "invalidRequest"
-	case errors.Is(err, accountapp.ErrConversionBusy):
-		return "accountConversionBusy"
-	case errors.Is(err, accountapp.ErrUnsupported):
-		return "accountOperationUnsupported"
-	case errors.Is(err, accountapp.ErrNotFound):
-		return "accountNotFound"
-	default:
-		return fallback
-	}
-}
-
-func accountStreamErrorMessage(err error, fallback string) string {
-	if err == nil {
-		return fallback
-	}
-	if errors.Is(err, accountapp.ErrInvalidInput) || errors.Is(err, accountapp.ErrInvalidImport) ||
-		errors.Is(err, accountapp.ErrConversionBusy) || errors.Is(err, accountapp.ErrUnsupported) ||
-		errors.Is(err, accountapp.ErrNotFound) {
-		return err.Error()
-	}
-	// Prefer detailed message when present; keep fallback for opaque internals.
-	msg := strings.TrimSpace(err.Error())
-	if msg == "" {
-		return fallback
-	}
-	return msg
 }
 
 func newBuildConversionResponse(result accountapp.BuildConversionResult, syncResult accountsyncapp.Result) buildConversionResponse {
@@ -981,8 +851,7 @@ func (h *Handler) refreshWebQuota(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ctx := accountapp.WithSyncSource(c.Request.Context(), accountapp.SyncSourceManual)
-	if _, err := h.service.RefreshQuota(ctx, id); err != nil {
+	if _, err := h.service.RefreshQuota(c.Request.Context(), id); err != nil {
 		h.writeServiceError(c, "quotaRefreshFailed", err, http.StatusBadGateway, "同步 Provider 额度失败")
 		return
 	}
@@ -1061,7 +930,7 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error, fall
 		response.Error(c, http.StatusConflict, "accountOperationUnsupported", err.Error())
 	case errors.Is(err, accountapp.ErrConversionBusy):
 		response.Error(c, http.StatusConflict, "accountConversionBusy", err.Error())
-	case errors.Is(err, accountapp.ErrUpstreamSyncDisabled):
+case errors.Is(err, accountapp.ErrUpstreamSyncDisabled):
 		response.Error(c, http.StatusConflict, "upstreamSyncDisabled", "上游余额/额度同步已禁用，可在 provider.proactiveUpstreamSync 中开启")
 	default:
 		response.Error(c, fallbackStatus, code, fallbackMessage)
@@ -1086,8 +955,7 @@ func (h *Handler) refreshBilling(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ctx := accountapp.WithSyncSource(c.Request.Context(), accountapp.SyncSourceManual)
-	value, err := h.service.RefreshBilling(ctx, id)
+	value, err := h.service.RefreshBilling(c.Request.Context(), id)
 	if err != nil {
 		h.writeServiceError(c, "billingRefreshFailed", err, http.StatusBadGateway, "刷新账号额度失败")
 		return
@@ -1098,8 +966,7 @@ func (h *Handler) refreshBilling(c *gin.Context) {
 func (h *Handler) refreshAllBilling(c *gin.Context) {
 	stream := newAccountEventStream(c)
 	defer stream.Close()
-	ctx := accountapp.WithSyncSource(c.Request.Context(), accountapp.SyncSourceManual)
-	succeeded, failed, err := h.service.SyncAllBillingWithProgress(ctx, stream.ProgressObserver())
+	succeeded, failed, err := h.service.SyncAllBillingWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
 		if errors.Is(err, accountapp.ErrUpstreamSyncDisabled) {
 			stream.WriteError("upstreamSyncDisabled", "上游余额/额度同步已禁用，可在 provider.proactiveUpstreamSync 中开启")
@@ -1125,8 +992,7 @@ func (h *Handler) refreshAllTokens(c *gin.Context) {
 func (h *Handler) refreshAllWebQuotas(c *gin.Context) {
 	stream := newAccountEventStream(c)
 	defer stream.Close()
-	ctx := accountapp.WithSyncSource(c.Request.Context(), accountapp.SyncSourceManual)
-	succeeded, failed, err := h.service.SyncAllWebQuotasWithProgress(ctx, stream.ProgressObserver())
+	succeeded, failed, err := h.service.SyncAllWebQuotasWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
 		if errors.Is(err, accountapp.ErrUpstreamSyncDisabled) {
 			stream.WriteError("upstreamSyncDisabled", "上游余额/额度同步已禁用，可在 provider.proactiveUpstreamSync 中开启")
@@ -1141,8 +1007,7 @@ func (h *Handler) refreshAllWebQuotas(c *gin.Context) {
 func (h *Handler) refreshAllConsoleQuotas(c *gin.Context) {
 	stream := newAccountEventStream(c)
 	defer stream.Close()
-	ctx := accountapp.WithSyncSource(c.Request.Context(), accountapp.SyncSourceManual)
-	succeeded, failed, err := h.service.SyncAllConsoleQuotasWithProgress(ctx, stream.ProgressObserver())
+	succeeded, failed, err := h.service.SyncAllConsoleQuotasWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
 		if errors.Is(err, accountapp.ErrUpstreamSyncDisabled) {
 			stream.WriteError("upstreamSyncDisabled", "上游余额/额度同步已禁用，可在 provider.proactiveUpstreamSync 中开启")

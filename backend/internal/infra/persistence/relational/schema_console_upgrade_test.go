@@ -52,7 +52,7 @@ func TestInitializeSchemaUpgradesProviderChecksForConsole(t *testing.T) {
 	if err != nil || len(windows[created.ID]) != 1 || windows[created.ID][0].Remaining != 7 {
 		t.Fatalf("existing quota windows were not preserved: %#v, err=%v", windows, err)
 	}
-	for _, table := range []string{"provider_accounts", "model_routes", "request_audits", "response_ownership"} {
+	for _, table := range []string{"provider_accounts", "model_routes", "request_audits", "response_ownership", "egress_nodes"} {
 		var sql string
 		if err := database.db.WithContext(ctx).Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&sql).Error; err != nil {
 			t.Fatal(err)
@@ -60,14 +60,6 @@ func TestInitializeSchemaUpgradesProviderChecksForConsole(t *testing.T) {
 		if !strings.Contains(sql, "grok_console") {
 			t.Fatalf("table %s was not upgraded: %s", table, sql)
 		}
-	}
-	// egress_nodes.scope allows multi-value (comma-separated) scopes; constraint is length-based, not IN(...).
-	var egressSQL string
-	if err := database.db.WithContext(ctx).Raw("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", "egress_nodes").Scan(&egressSQL).Error; err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(egressSQL, "chk_egress_nodes_specific_scope") || !strings.Contains(egressSQL, "length(trim(scope))") {
-		t.Fatalf("egress_nodes multi-scope constraint missing: %s", egressSQL)
 	}
 	assertSQLiteUniqueIndexes(t, database, "provider_accounts", "idx_provider_accounts_identity_key")
 	assertSQLiteUniqueIndexes(t, database, "model_routes", "idx_model_routes_public_id", "uidx_provider_upstream")

@@ -54,19 +54,12 @@ func (a *Adapter) ConvertToBuild(ctx context.Context, credential accountdomain.C
 	if token == "" {
 		return provider.CredentialSeed{}, provider.ErrUnauthorized
 	}
-	// Prefer account ID affinity so concurrent conversions spread across proxies;
-	// fall back to source key for seeds that are not yet persisted.
-	affinity := fmt.Sprintf("sso-build:%d", credential.ID)
-	if credential.ID == 0 {
-		affinity = "sso-build:" + credential.SourceKey
-	}
-	lease, err := a.egress.Acquire(ctx, egressdomain.ScopeWeb, affinity)
+	lease, err := a.egress.Acquire(ctx, egressdomain.ScopeWeb, "sso-build:"+credential.SourceKey)
 	if err != nil {
 		return provider.CredentialSeed{}, err
 	}
 	defer lease.Release()
-	// SSO auto-approve path is short-lived; keep a hard cap so stuck proxies fail fast.
-	requestCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	flow := &ssoBuildFlow{
 		client: lease, userAgent: lease.UserAgent,
@@ -179,29 +172,17 @@ type ssoBuildToken struct {
 }
 
 func (f *ssoBuildFlow) pollToken(ctx context.Context, deviceCode string, interval, expiresIn time.Duration) (ssoBuildToken, error) {
-	// After SSO auto-approve, the token is usually ready immediately. Poll first,
-	// then wait only when the server returns authorization_pending / slow_down.
-	if interval < 500*time.Millisecond {
-		interval = 500 * time.Millisecond
+	if interval < time.Second {
+		interval = time.Second
 	}
-	// Cap idle wait between polls: default upstream interval is often 5s which
-	// made bulk convert feel much slower than Web→Console (local SSO copy).
-	if interval > 2*time.Second {
-		interval = 2 * time.Second
-	}
-	deadline := time.Now().Add(min(expiresIn, 45*time.Second))
-	for attempt := 0; time.Now().Before(deadline); attempt++ {
-		if err := ctx.Err(); err != nil {
-			return ssoBuildToken{}, err
-		}
-		if attempt > 0 {
-			timer := time.NewTimer(interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ssoBuildToken{}, ctx.Err()
-			case <-timer.C:
-			}
+	deadline := time.Now().Add(min(expiresIn, 75*time.Second))
+	for time.Now().Before(deadline) {
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ssoBuildToken{}, ctx.Err()
+		case <-timer.C:
 		}
 		status, _, body, err := f.do(ctx, http.MethodPost, ssoTokenURL, url.Values{
 			"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "client_id": {ssoBuildClientID}, "device_code": {deviceCode},
@@ -230,10 +211,7 @@ func (f *ssoBuildFlow) pollToken(ctx context.Context, deviceCode string, interva
 		case "authorization_pending":
 			continue
 		case "slow_down":
-			interval += time.Second
-			if interval > 5*time.Second {
-				interval = 5 * time.Second
-			}
+			interval += 5 * time.Second
 			continue
 		case "access_denied", "expired_token":
 			return ssoBuildToken{}, provider.ErrAuthorizationDenied

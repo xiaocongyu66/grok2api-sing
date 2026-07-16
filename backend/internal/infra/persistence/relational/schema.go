@@ -26,12 +26,13 @@ var schemaModels = []any{
 	&clientKeyModelPermission{},
 	&billingReservationModel{},
 	&requestAuditModel{},
+	&requestAuditAttemptModel{},
 	&responseOwnershipModel{},
 	&webResponseStateModel{},
 	&mediaJobModel{},
 	&mediaAssetModel{},
 	&runtimeSettingsModel{},
-	&promptCacheAffinityModel{},
+		&promptCacheAffinityModel{},
 	&egressNodeModel{},
 }
 
@@ -62,7 +63,8 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_audits_account_created_id ON request_audits(account_id, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_status_created_id ON request_audits(status_code, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_audits_streaming_created_id ON request_audits(streaming, created_at DESC, id DESC)",
-	"CREATE INDEX IF NOT EXISTS idx_audits_client_type_created ON request_audits(client_type, created_at DESC, id DESC)",
+	"CREATE INDEX IF NOT EXISTS idx_audit_attempts_audit_number ON request_audit_attempts(audit_id, number)",
+		"CREATE INDEX IF NOT EXISTS idx_audits_client_type_created ON request_audits(client_type, created_at DESC, id DESC)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_expires ON response_ownership(expires_at)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_account ON response_ownership(account_id)",
 	"CREATE INDEX IF NOT EXISTS idx_response_ownership_client_key ON response_ownership(client_key_id)",
@@ -72,7 +74,7 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_recovery ON media_jobs(status, lease_until, created_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_usage_recovery ON media_jobs(status, usage_recorded_at, completed_at, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_assets_created ON media_assets(created_at DESC, id)",
-	"CREATE INDEX IF NOT EXISTS idx_prompt_cache_affinity_expires ON prompt_cache_affinity(expires_at)",
+		"CREATE INDEX IF NOT EXISTS idx_prompt_cache_affinity_expires ON prompt_cache_affinity(expires_at)",
 }
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。
@@ -122,12 +124,7 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			// Egress scopes may be multi-value (comma-separated); recreate any old single-value IN(...) check.
-			if value.name == "chk_egress_nodes_specific_scope" {
-				if strings.Contains(definition, "length(trim(scope))") || strings.Contains(definition, "length(trim(scope)) BETWEEN") {
-					continue
-				}
-			} else if strings.Contains(definition, "grok_console") {
+			if strings.Contains(definition, "grok_console") {
 				continue
 			}
 			if definition != "" {
@@ -138,11 +135,6 @@ func (d *Database) ensureConsoleConstraints(ctx context.Context) error {
 			if err := db.Migrator().CreateConstraint(value.model, value.name); err != nil {
 				return fmt.Errorf("创建约束 %s: %w", value.name, err)
 			}
-		}
-		// Multi-scope values need a wider scope column (was size 32).
-		if err := db.Migrator().AlterColumn(&egressNodeModel{}, "Scope"); err != nil {
-			// Best-effort: older dialects may already match or refuse noop alters.
-			_ = err
 		}
 		return nil
 	}

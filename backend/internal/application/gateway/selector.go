@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +25,9 @@ type accountLease struct {
 
 const quotaProbeLease = 5 * time.Minute
 const successPersistInterval = 30 * time.Second
-// candidateCacheTTL balances account list freshness vs DB load under multi-instance Redis routing.
-const candidateCacheTTL = 5 * time.Second
+// candidateCacheTTL trades a little routing freshness for fewer ListRoutingCandidates
+// DB hits under high RPS; sticky/prompt-cache still pin accounts independently.
+const candidateCacheTTL = 2 * time.Second
 
 type candidateSnapshot struct {
 	values    []account.RoutingCandidate
@@ -84,11 +84,7 @@ func (l *accountLease) Release() {
 	}
 }
 
-const maxRoundRobinCursorKeys = 4096
-
-// Selector implements CLIProxy-style round-robin account scheduling with per-account
-// MaxConcurrent slots (sub2api-style acquire-or-skip). Saturated accounts are skipped
-// and the next candidate in the rotation is tried.
+// Selector 实现可替换的 balanced 账号选择策略。
 type Selector struct {
 	accounts       repository.AccountRepository
 	concurrency    repository.ConcurrencyLimiter
@@ -102,8 +98,6 @@ type Selector struct {
 	leaseWake      chan struct{}
 	lastSelectedAt map[uint64]time.Time
 	lastSuccessAt  map[uint64]time.Time
-	// rrCursors tracks provider:model:quotaMode rotation indexes (CLIProxy RoundRobinSelector).
-	rrCursors      map[string]int
 	candidates     map[candidateCacheKey]candidateSnapshot
 	candidateLoads singleflight.Group
 	tierOrders     interface {
@@ -118,12 +112,7 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{
-		accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders,
-		stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait,
-		leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time),
-		rrCursors: make(map[string]int), candidates: make(map[candidateCacheKey]candidateSnapshot),
-	}
+	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot)}
 }
 
 func (s *Selector) UpdateConfig(stickyTTL, cooldownBase, cooldownMax time.Duration, capacityWait ...time.Duration) {
@@ -151,6 +140,8 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		return nil, err
 	}
 	normalCandidates := make([]account.RoutingCandidate, 0, len(values))
+	// normalByID enables O(1) sticky pin after the filter pass (large account pools).
+	normalByID := make(map[uint64]account.RoutingCandidate, len(values))
 	probeCandidates := make([]account.RoutingCandidate, 0, len(values))
 	supportedCandidates := 0
 	consideredCandidates := 0
@@ -202,6 +193,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			continue
 		}
 		normalCandidates = append(normalCandidates, candidate)
+		normalByID[value.ID] = candidate
 	}
 	if len(normalCandidates) == 0 && len(probeCandidates) == 0 {
 		reason := SelectionNoAccounts
@@ -218,10 +210,11 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		return nil, &SelectionUnavailableError{Reason: reason, RetryAfter: retryDelay(now, earliestRetry)}
 	}
 	if len(probeCandidates) > 0 {
-		if err := s.sortCandidates(ctx, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel)); err != nil {
+		plan, err := s.planCandidates(ctx, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel))
+		if err != nil {
 			return nil, err
 		}
-		for _, candidate := range probeCandidates {
+		for candidate, ok := plan.Next(); ok; candidate, ok = plan.Next() {
 			lease, err := s.claimAccountSlot(ctx, candidate.Credential)
 			if err != nil {
 				return nil, err
@@ -249,33 +242,28 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			return nil, fmt.Errorf("读取会话粘滞状态: %w", err)
 		}
 		if ok {
-			for _, candidate := range normalCandidates {
-				if candidate.Credential.ID == stickyID {
-					lease, acquireErr := s.claimAccountSlot(ctx, candidate.Credential)
-					if acquireErr != nil {
-						return nil, acquireErr
-					}
-					if lease != nil {
-						lease.Billing = candidate.Billing
-						lease.QuotaMode = effectiveQuotaMode(candidate, quotaMode)
-						return lease, nil
-					}
+			if candidate, found := normalByID[stickyID]; found {
+				lease, acquireErr := s.claimAccountSlot(ctx, candidate.Credential)
+				if acquireErr != nil {
+					return nil, acquireErr
+				}
+				if lease != nil {
+					lease.Billing = candidate.Billing
+					lease.QuotaMode = effectiveQuotaMode(candidate, quotaMode)
+					return lease, nil
 				}
 			}
 		}
 	}
 	_, _, _, capacityWait := s.routingConfig()
 	waitDeadline := time.Now().Add(capacityWait)
-	scheduleKey := roundRobinKey(provider, upstreamModel, quotaMode)
 	for {
 		currentTime := time.Now().UTC()
-		// Sort by priority/tier/capacity; RR only within equal priority+tier groups (CLIProxy).
-		if err := s.sortCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel)); err != nil {
+		plan, err := s.planCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel))
+		if err != nil {
 			return nil, err
 		}
-		ordered := s.orderWithRoundRobin(normalCandidates, scheduleKey, s.resolveTierOrder(provider, upstreamModel))
-		for _, candidate := range ordered {
-			// Per-account MaxConcurrent: claim fails (nil) when the slot is full → try next account.
+		for candidate, ok := plan.Next(); ok; candidate, ok = plan.Next() {
 			lease, err := s.claimAccountSlot(ctx, candidate.Credential)
 			if err != nil {
 				return nil, err
@@ -283,7 +271,6 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			if lease == nil {
 				continue
 			}
-			s.advanceRoundRobin(scheduleKey, candidate.Credential, s.resolveTierOrder(provider, upstreamModel))
 			if stickyKey != "" {
 				stickyTTL, _, _, _ := s.routingConfig()
 				if err := s.sticky.Set(ctx, stickyKey, candidate.Credential.ID, currentTime.Add(stickyTTL)); err != nil {
@@ -306,71 +293,6 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
 		}
 	}
-}
-
-func roundRobinKey(provider account.Provider, upstreamModel, quotaMode string) string {
-	return string(provider) + ":" + strings.TrimSpace(upstreamModel) + ":" + strings.TrimSpace(quotaMode)
-}
-
-func candidateScheduleGroup(value account.RoutingCandidate, tierOrder []account.WebTier) string {
-	return fmt.Sprintf("%d:%d", value.Credential.Priority, tierOrderRank(tierOrder, value.Credential.WebTier))
-}
-
-// orderWithRoundRobin walks priority/tier groups in sorted order and rotates only
-// inside each equal group — matching CLIProxy (RR among best-priority peers only).
-func (s *Selector) orderWithRoundRobin(values []account.RoutingCandidate, key string, tierOrder []account.WebTier) []account.RoutingCandidate {
-	if len(values) <= 1 {
-		return values
-	}
-	result := make([]account.RoutingCandidate, 0, len(values))
-	for start := 0; start < len(values); {
-		end := start + 1
-		group := candidateScheduleGroup(values[start], tierOrder)
-		for end < len(values) && candidateScheduleGroup(values[end], tierOrder) == group {
-			end++
-		}
-		result = append(result, s.rotateGroup(values[start:end], key+":"+group)...)
-		start = end
-	}
-	return result
-}
-
-func (s *Selector) rotateGroup(values []account.RoutingCandidate, key string) []account.RoutingCandidate {
-	if len(values) <= 1 {
-		return append([]account.RoutingCandidate(nil), values...)
-	}
-	s.mu.Lock()
-	if s.rrCursors == nil {
-		s.rrCursors = make(map[string]int)
-	}
-	if _, ok := s.rrCursors[key]; !ok && len(s.rrCursors) >= maxRoundRobinCursorKeys {
-		s.rrCursors = make(map[string]int)
-	}
-	cursor := s.rrCursors[key]
-	if cursor >= 2_147_483_640 {
-		cursor = 0
-		s.rrCursors[key] = 0
-	}
-	s.mu.Unlock()
-	start := cursor % len(values)
-	if start == 0 {
-		return append([]account.RoutingCandidate(nil), values...)
-	}
-	rotated := make([]account.RoutingCandidate, 0, len(values))
-	rotated = append(rotated, values[start:]...)
-	rotated = append(rotated, values[:start]...)
-	return rotated
-}
-
-func (s *Selector) advanceRoundRobin(baseKey string, credential account.Credential, tierOrder []account.WebTier) {
-	group := fmt.Sprintf("%d:%d", credential.Priority, tierOrderRank(tierOrder, credential.WebTier))
-	key := baseKey + ":" + group
-	s.mu.Lock()
-	if s.rrCursors == nil {
-		s.rrCursors = make(map[string]int)
-	}
-	s.rrCursors[key]++
-	s.mu.Unlock()
 }
 
 // promptCacheStickyKey 将调用方缓存键压缩为固定长度，仅用于本地账号粘滞索引。
@@ -627,12 +549,12 @@ func (s *Selector) invalidateCandidates(provider account.Provider) {
 	}
 }
 
-// claimAccountSlot tries to take one in-flight slot up to credential.MaxConcurrent.
-// Returns (nil, nil) when the account is at its concurrency cap so the caller can
-// round-robin to the next account (CLIProxy skip + sub2api tryAcquire pattern).
 func (s *Selector) claimAccountSlot(ctx context.Context, value account.Credential) (*accountLease, error) {
-	limit := accountMaxConcurrent(value)
-	release, acquired, err := s.concurrency.Acquire(ctx, fmt.Sprintf("account:%d", value.ID), limit)
+	limit := value.MaxConcurrent
+	if limit <= 0 {
+		limit = account.DefaultMaxConcurrent
+	}
+	release, acquired, err := s.concurrency.Acquire(ctx, accountConcurrencyKey(value.ID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("获取账号并发租约: %w", err)
 	}
@@ -721,98 +643,6 @@ func retryDelay(now, retryAt time.Time) time.Duration {
 		return 0
 	}
 	return retryAt.Sub(now)
-}
-
-func accountMaxConcurrent(value account.Credential) int {
-	limit := value.MaxConcurrent
-	if limit <= 0 {
-		limit = account.DefaultMaxConcurrent
-	}
-	return limit
-}
-
-func (s *Selector) sortCandidates(ctx context.Context, values []account.RoutingCandidate, now time.Time, tierOrder []account.WebTier) error {
-	s.mu.Lock()
-	lastSelected := make(map[uint64]time.Time, len(s.lastSelectedAt))
-	for id, value := range s.lastSelectedAt {
-		lastSelected[id] = value
-	}
-	s.mu.Unlock()
-	remaining := make(map[uint64]float64, len(values))
-	fresh := make(map[uint64]bool, len(values))
-	inFlight := make(map[uint64]int, len(values))
-	// saturated = at or above MaxConcurrent → sort after accounts with free slots so RR can skip them quickly.
-	saturated := make(map[uint64]bool, len(values))
-	concurrencyKeys := make([]string, 0, len(values))
-	for _, candidate := range values {
-		concurrencyKeys = append(concurrencyKeys, fmt.Sprintf("account:%d", candidate.Credential.ID))
-	}
-	concurrencySnapshot := make(map[string]int, len(values))
-	batchReader, batched := s.concurrency.(repository.ConcurrencySnapshotReader)
-	if batched {
-		var err error
-		concurrencySnapshot, err = batchReader.CurrentMany(ctx, concurrencyKeys)
-		if err != nil {
-			return fmt.Errorf("批量读取账号并发租约: %w", err)
-		}
-	}
-	for _, candidate := range values {
-		value := candidate.Credential
-		key := fmt.Sprintf("account:%d", value.ID)
-		current, found := concurrencySnapshot[key]
-		if !batched {
-			var err error
-			current, err = s.concurrency.Current(ctx, key)
-			if err != nil {
-				return fmt.Errorf("读取账号并发租约: %w", err)
-			}
-		} else if !found {
-			current = 0
-		}
-		inFlight[value.ID] = current
-		saturated[value.ID] = current >= accountMaxConcurrent(value)
-		if candidate.Billing != nil {
-			remaining[value.ID] = candidate.Billing.Remaining()
-			fresh[value.ID] = now.Sub(candidate.Billing.SyncedAt) <= 30*time.Minute
-		}
-	}
-	// Stable sort by: model support → tier → priority → free capacity → least load → remaining → last used → id.
-	// Round-robin rotation is applied after this sort in rotateRoundRobin so equal-priority accounts share traffic.
-	sort.SliceStable(values, func(i, j int) bool {
-		leftCandidate, rightCandidate := values[i], values[j]
-		left, right := leftCandidate.Credential, rightCandidate.Credential
-		if leftCandidate.SupportsModel != rightCandidate.SupportsModel {
-			return leftCandidate.SupportsModel
-		}
-		if leftCandidate.ModelCapabilityKnown != rightCandidate.ModelCapabilityKnown {
-			return leftCandidate.ModelCapabilityKnown
-		}
-		leftTier, rightTier := tierOrderRank(tierOrder, left.WebTier), tierOrderRank(tierOrder, right.WebTier)
-		if leftTier != rightTier {
-			return leftTier < rightTier
-		}
-		if left.Priority != right.Priority {
-			return left.Priority > right.Priority
-		}
-		// Prefer accounts with free MaxConcurrent slots (skip saturated until others are full).
-		if saturated[left.ID] != saturated[right.ID] {
-			return !saturated[left.ID]
-		}
-		if fresh[left.ID] != fresh[right.ID] {
-			return fresh[left.ID]
-		}
-		if inFlight[left.ID] != inFlight[right.ID] {
-			return inFlight[left.ID] < inFlight[right.ID]
-		}
-		if remaining[left.ID] != remaining[right.ID] {
-			return remaining[left.ID] > remaining[right.ID]
-		}
-		if !lastSelected[left.ID].Equal(lastSelected[right.ID]) {
-			return lastSelected[left.ID].Before(lastSelected[right.ID])
-		}
-		return left.ID < right.ID
-	})
-	return nil
 }
 
 func (s *Selector) resolveTierOrder(provider account.Provider, upstreamModel string) []account.WebTier {

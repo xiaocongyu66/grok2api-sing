@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Box, ChevronDown, Eye, Image, KeyRound, Languages, LayoutDashboard, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreHorizontal, Network, Settings, Sun, Users, Video } from "lucide-react";
+import { Box, ChevronDown, Eye, Image, KeyRound, Languages, LayoutDashboard, LogOut, Menu, MessageSquareText, Monitor, Moon, MoreHorizontal, Settings, Sun, Users, Video, Network} from "lucide-react";
 import { useTheme } from "next-themes";
 import { useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
@@ -25,22 +25,18 @@ const navigation = [
   { href: "/proxies", label: "nav.proxies", icon: Network },
   { href: "/client-keys", label: "nav.clientKeys", icon: KeyRound },
   { href: "/models", label: "nav.models", icon: Box },
+  { href: "/gallery", label: "nav.gallery", icon: Image },
+  { href: "/video-gallery", label: "nav.videoGallery", icon: Video },
   { href: "/request-audits", label: "nav.audits", icon: Eye },
 ] as const;
 
 const documentation = [
   {
-    label: "OpenAI",
+    label: "Chat",
     icon: MessageSquareText,
     items: [
       { href: "/docs/chat/completions", label: "Chat Completions", method: "POST" },
       { href: "/docs/chat/responses", label: "Responses", method: "POST" },
-    ],
-  },
-  {
-    label: "Anthropic",
-    icon: MessageSquareText,
-    items: [
       { href: "/docs/chat/messages", label: "Messages", method: "POST" },
     ],
   },
@@ -253,7 +249,7 @@ export function AppShell() {
             </Button>
           </header>
 
-          <main className="mx-auto w-full min-w-0 max-w-[1280px] flex-1 px-4 py-6 sm:px-8 sm:py-8 lg:py-20">
+          <main className="mx-auto w-full max-w-[1280px] flex-1 px-5 py-8 sm:px-8 lg:py-20">
             <Outlet />
           </main>
           <SiteFooter />

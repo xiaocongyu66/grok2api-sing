@@ -3,7 +3,7 @@ name: grok2api
 services:
   grok2api:
     container_name: grok2api
-    image: "${GROK2API_IMAGE:-ghcr.io/xiaocongyu66/grok2api-sing:latest}"
+    image: "${GROK2API_IMAGE:-ghcr.io/chenyme/grok2api:latest}"
     ports:
       - "${GROK2API_PORT:-8000}:8000"
     environment:
@@ -16,24 +16,6 @@ services:
     stop_grace_period: 30s
     security_opt:
       - no-new-privileges:true
-    # 多实例时取消注释并依赖 redis：
-    # depends_on:
-    #   - redis
-
-  # 多实例 / 需要共享限流·粘滞·Web 会话缓存时启用 Redis。
-  # config.yaml:
-  #   runtimeStore:
-  #     driver: redis
-  #     redis:
-  #       address: "redis:6379"
-  #       keyPrefix: "grok2api:"
-  # redis:
-  #   container_name: grok2api-redis
-  #   image: redis:7-alpine
-  #   restart: unless-stopped
-  #   command: ["redis-server", "--save", "", "--appendonly", "no"]
-  #   volumes:
-  #     - grok2api-redis:/data
 
   # 如果出口 IP 不干净，可取消以下注释使用 WARP 作为落地代理。
   # 启用后，在管理端“设置 -> 出口代理”中新增 socks5://warp:1080。
@@ -50,4 +32,3 @@ services:
 
 volumes:
   grok2api-data:
-  # grok2api-redis:
