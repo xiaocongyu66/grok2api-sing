@@ -12,6 +12,11 @@ type Cache interface {
 	Remember(ctx context.Context, fingerprint, id string, ttl time.Duration, expire bool) error
 }
 
+// DurableLookup is optional on durable stores for non-creating reads.
+type DurableLookup interface {
+	Lookup(ctx context.Context, fingerprint string, now time.Time) (string, bool, error)
+}
+
 // LayeredStore: Redis/memory cache → SQL durable GetOrCreate.
 // SQL is source of truth across restarts and multi-instance deploys.
 type LayeredStore struct {
@@ -48,4 +53,27 @@ func (s *LayeredStore) GetOrCreate(ctx context.Context, fingerprint, newID strin
 		_ = s.cache.Remember(ctx, fingerprint, id, ttl, expire)
 	}
 	return id, nil
+}
+
+// Lookup returns an existing mapping without creating one.
+func (s *LayeredStore) Lookup(ctx context.Context, fingerprint string, now time.Time) (string, bool, error) {
+	if fingerprint == "" {
+		return "", false, nil
+	}
+	if s.cache != nil {
+		if id, ok, err := s.cache.Lookup(ctx, fingerprint); err == nil && ok && id != "" {
+			return id, true, nil
+		}
+	}
+	if looker, ok := s.durable.(DurableLookup); ok {
+		id, found, err := looker.Lookup(ctx, fingerprint, now)
+		if err != nil || !found {
+			return "", found, err
+		}
+		if s.cache != nil {
+			_ = s.cache.Remember(ctx, fingerprint, id, 24*time.Hour, true)
+		}
+		return id, true, nil
+	}
+	return "", false, nil
 }

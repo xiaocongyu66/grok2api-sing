@@ -57,7 +57,7 @@ func convertChatRequest(body []byte, model string) ([]byte, error) {
 		return nil, err
 	}
 	target := map[string]json.RawMessage{"model": mustJSON(model), "input": mustJSON(input)}
-	copyFields(target, source, "stream", "temperature", "top_p", "presence_penalty", "frequency_penalty", "seed", "user", "parallel_tool_calls", "metadata", "store", "service_tier", "stop")
+	copyFields(target, source, "stream", "temperature", "top_p", "presence_penalty", "frequency_penalty", "seed", "user", "parallel_tool_calls", "metadata", "store", "service_tier", "stop", "prompt_cache_key")
 	if raw := firstJSON(source["max_completion_tokens"], source["max_tokens"]); !isEmptyJSON(raw) {
 		target["max_output_tokens"] = raw
 	}
@@ -310,6 +310,10 @@ func convertMessagesRequest(body []byte, model string) ([]byte, ResponseOptions,
 		if userID, _ := request.Metadata["user_id"].(string); strings.TrimSpace(userID) != "" {
 			target["safety_identifier"] = strings.TrimSpace(userID)
 		}
+	}
+	// Optional OpenAI-style affinity key injected by the gateway for prompt-cache hits.
+	if key, _ := request.Metadata["prompt_cache_key"].(string); strings.TrimSpace(key) != "" {
+		target["prompt_cache_key"] = strings.TrimSpace(key)
 	}
 	if request.OutputConfig != nil && request.OutputConfig.Format != nil {
 		if request.OutputConfig.Format.Type != "json_schema" || request.OutputConfig.Format.Schema == nil {

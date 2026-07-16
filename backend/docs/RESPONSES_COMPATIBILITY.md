@@ -137,20 +137,27 @@ Grok Build / Console 原样透传上游 usage 中的 `input_tokens_details.cache
 
 要看到非 0 的真实 `cached_tokens`，需要**稳定**的会话亲和键（同一会话固定、只追加消息、不改历史前缀）。网关解析优先级：
 
-1. 客户端会话头（Claude Code / Codex / Grok CLI 风格）：`x-claude-code-session-id`、`session-id`、`x-session-id`、`x-codex-window-id`、`x-codex-session-id`、`x-grok-conv-id` 等  
-2. Body：`prompt_cache_key` / `user` / `metadata.user_id`  
-3. 若开启 `routing.promptCacheAffinity`：按 **API Key + 客户端 IP + User-Agent** 指纹映射到固定 `xai_…` id  
+1. 客户端显式会话标识（Claude Code / Codex / Grok CLI 等）：body `prompt_cache_key` / `user` / `metadata.user_id`，以及 Header `x-grok-conv-id`、`x-claude-code-session-id`、`session-id`、`x-codex-window-id`、`x-codex-session-id`、`x-conversation-id` 等  
+2. **续轮联动**：body `previous_response_id` 映射到上一轮使用的亲和键（响应完成后写入 `prompt_cache_affinity`）  
+3. **会话种子**：由 system/instructions + 首条 user 文本生成稳定 seed（适合 Grok CLI / Chat 重放完整历史、却不带会话头的场景）  
+4. 若开启 `routing.promptCacheAffinity.fingerprint`：按 **API Key + 客户端 IP + User-Agent** 映射到固定 `xai_…` id（最后兜底，粒度较粗）  
    - **SQL** 表 `prompt_cache_affinity` 为持久化真源（重启/换机可恢复）  
    - **Redis**（或无 Redis 时的 memory）为热缓存层  
    - 可配置是否过期与 TTL；过期行由后台任务清理
 
+解析到的亲和键会：
+
+- 写入上游 Header `x-grok-conv-id` / `x-grok-conversation-id`
+- 注入上游 body `prompt_cache_key`（Chat/Messages 转换后也会重新注入）
+- 回传给客户端：`X-Grok-Conv-Id` 与 `X-Grok2API-Prompt-Cache-Key`（便于下一轮原样带回）
+
 | 协议 | 推荐传法 |
 |------|----------|
-| Responses | body `prompt_cache_key`，或 Header `x-grok-conv-id` |
-| Chat Completions | Header `x-grok-conv-id` / 客户端会话头，或 body `prompt_cache_key` / `user` / `metadata.user_id` |
-| Messages | Header 会话头，或 body `metadata.user_id` |
+| Responses | body `prompt_cache_key` 或 `previous_response_id`，或 Header `x-grok-conv-id` |
+| Chat Completions | Header 会话头，或 body `prompt_cache_key` / `user`；否则靠会话种子 |
+| Messages | Header 会话头，或 body `metadata.user_id`；否则靠会话种子 |
 
-管理端「设置 → Prompt 缓存亲和」可开关指纹映射与过期策略。网关**只稳定亲和键、不伪造** `cached_tokens`。
+管理端「设置 → Prompt 缓存亲和」可开关指纹映射与过期策略。网关**只稳定亲和键、不伪造** `cached_tokens`。Agent 若每轮改 system/tools，上游仍可能无法命中前缀。
 
 Grok Web 付费账号使用 `GrokBuildBilling/GetGrokCreditsConfig` 返回的统一周额度池：保存真实使用百分比、产品枚举分解、周期起止和重置时间，并作为 Chat、Imagine、图片编辑和视频共享的路由总闸门。成功调用后异步刷新周池，不按未知权重进行本地伪扣减；耗尽后按真实周重置时间进入单次恢复队列。
 

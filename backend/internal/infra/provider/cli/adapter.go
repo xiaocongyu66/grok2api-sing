@@ -98,6 +98,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return invalidResponsesResponse(err), nil
 		}
 	}
+	// Ensure upstream body carries the same affinity key as x-grok-conv-id headers.
+	// Chat/Messages conversion may drop prompt_cache_key; reinject after normalize.
+	body = ensurePromptCacheKeyInBody(body, request.PromptCacheKey)
 	var bodyReader io.Reader
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
@@ -349,6 +352,34 @@ func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, 
 	return marshalCredentials(values)
 }
 
+// ensurePromptCacheKeyInBody sets body prompt_cache_key when the gateway resolved a stable key.
+func ensurePromptCacheKeyInBody(body []byte, promptCacheKey string) []byte {
+	promptCacheKey = strings.TrimSpace(promptCacheKey)
+	if promptCacheKey == "" || len(body) == 0 {
+		return body
+	}
+	var payload map[string]json.RawMessage
+	if json.Unmarshal(body, &payload) != nil {
+		return body
+	}
+	if raw, ok := payload["prompt_cache_key"]; ok {
+		var existing string
+		if json.Unmarshal(raw, &existing) == nil && strings.TrimSpace(existing) != "" {
+			return body
+		}
+	}
+	encoded, err := json.Marshal(promptCacheKey)
+	if err != nil {
+		return body
+	}
+	payload["prompt_cache_key"] = encoded
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential, accessToken, model, promptCacheKey string, trace bool) error {
 	cfg := a.config()
 	identity, err := a.clientIdentity(credential.ID)
@@ -359,6 +390,8 @@ func (a *Adapter) applyHeaders(req *http.Request, credential account.Credential,
 	if err != nil {
 		return err
 	}
+	// Prefer the gateway-resolved affinity key. Only invent a random id when the
+	// caller truly has none — that path cannot hit prompt cache across turns.
 	conversationID := strings.TrimSpace(promptCacheKey)
 	if conversationID == "" {
 		conversationID, err = randomHex(16)
