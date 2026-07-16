@@ -567,13 +567,56 @@ attemptLoop:
 			}
 			continue
 		}
+		// Peek the first bytes of a 2xx body before committing to this account.
+		// Empty success bodies ("模型未返回任何内容") should fail over when attempts remain.
+		body := response.Body
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
+			peeker := newPeekReadCloser(body)
+			empty, peekErr := peeker.empty()
+			if empty {
+				_ = peeker.Close()
+				lease.Release()
+				if peekErr != nil && !errors.Is(peekErr, io.EOF) {
+					lastErr = peekErr
+					if ctx.Err() != nil || errors.Is(peekErr, context.Canceled) {
+						lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), peekErr)}
+						break
+					}
+					lastFailure = newTransportUpstreamFailure(peekErr, credential.ID, credential.Name)
+				} else {
+					lastErr = fmt.Errorf("上游返回空响应")
+					lastFailure = &UpstreamFailure{
+						HTTPStatus: http.StatusBadGateway, Code: "upstream_empty_response",
+						PublicMessage: "上游未返回任何内容", AccountID: credential.ID, AccountName: credential.Name,
+						AccountScoped: true, Cause: io.EOF,
+					}
+					// Soft signal: do not permanently cool down, but try another account.
+					s.logger.Warn("upstream_empty_response", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "attempt", attempt+1)
+				}
+				if attempt+1 >= attempts {
+					break
+				}
+				continue
+			}
+			body = peeker
 		}
 		accountID := credential.ID
+		quotaProbe := lease.QuotaProbe
 		var once sync.Once
 		finalize := func(usage Usage, responseID, errorCode string) {
 			once.Do(func() {
+				// Mark success only after the body finished without transport/stream errors.
+				// Previously markSuccess ran before streaming completed, so mid-stream drops
+				// still boosted the account and kept bad routes hot.
+				bodyOK := response.StatusCode >= 200 && response.StatusCode < 300 &&
+					errorCode != "stream_interrupted" &&
+					errorCode != "response_too_large" &&
+					errorCode != "upstream_error"
+				if bodyOK {
+					s.selector.markSuccess(ctx, credential, quotaProbe)
+				} else if errorCode == "stream_interrupted" || errorCode == "response_too_large" {
+					s.logger.Warn("response_body_failed", "request_id", input.RequestID, "account_id", accountID, "provider", credential.Provider, "error_code", errorCode)
+				}
 				lease.Release()
 				persistCtx, cancel := context.WithTimeout(context.Background(), finalizationTimeout)
 				defer cancel()
@@ -593,7 +636,7 @@ attemptLoop:
 					record.MediaOutputImages = int64(max(0, response.QuotaUnits))
 				}
 				tokenPricing, tokenPriced := audit.EstimateOfficialCost(pricingModel, usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens, usage.ContextInputTokens)
-				if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" && imagePriced {
+				if bodyOK && imagePriced {
 					record.EstimatedCostInUSDTicks = imagePricing.CostInUSDTicks
 					record.PricingModel = imagePricing.Model
 					record.PricingVersion = audit.OfficialPricingAsOf
@@ -615,7 +658,7 @@ attemptLoop:
 				if usage.ResponseModel != "" {
 					_ = s.accounts.ObserveResponseModel(persistCtx, accountID, usage.ResponseModel)
 				}
-				if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" && lease.QuotaMode != "" {
+				if bodyOK && lease.QuotaMode != "" {
 					if lease.QuotaMode != "weekly" {
 						units := max(1, response.QuotaUnits)
 						updated, err := s.accounts.DecrementQuota(persistCtx, accountID, lease.QuotaMode, units)
@@ -629,19 +672,19 @@ attemptLoop:
 						s.accounts.QueueQuotaRefresh(accountID, lease.QuotaMode)
 					}
 				}
-				if supportsStoredResponses && operation == audit.OperationResponses && responseID != "" && response.StatusCode >= 200 && response.StatusCode < 300 {
+				if supportsStoredResponses && operation == audit.OperationResponses && responseID != "" && bodyOK {
 					_ = s.responses.Save(persistCtx, inferencedomain.ResponseOwnership{ResponseID: responseID, AccountID: accountID, ClientKeyID: input.ClientKey.ID, Provider: route.Provider, ExpiresAt: now.Add(responseOwnershipTTL), CreatedAt: now, UpdatedAt: now})
 				}
 				outcome := "failed"
-				if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
+				if bodyOK {
 					outcome = "success"
 				}
 				timing.finish(s.logger, outcome)
 			})
 		}
-		response.Body = &firstByteReadCloser{ReadCloser: response.Body, mark: timing.markFirstBody}
+		body = &firstByteReadCloser{ReadCloser: body, mark: timing.markFirstBody}
 		timingHandedOff = true
-		return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Finalize: finalize}, nil
+		return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Finalize: finalize}, nil
 	}
 	if lastFailure != nil {
 		record := auditBase
@@ -713,33 +756,33 @@ type ResourceInput struct {
 }
 
 type ImageGenerationInput struct {
-	RequestID      string
-	ClientKey      clientkey.Key
-	PublicModel    string
-	Prompt         string
-	Count          int
-	Size           string
-	AspectRatio    string
-	Resolution     string
-	ResponseFormat string
-	Streaming      bool
+	RequestID       string
+	ClientKey       clientkey.Key
+	PublicModel     string
+	Prompt          string
+	Count           int
+	Size            string
+	AspectRatio     string
+	Resolution      string
+	ResponseFormat  string
+	Streaming       bool
 	ClientType      string
 	ClientUserAgent string
 	ClientIP        string
 }
 
 type ImageEditInput struct {
-	RequestID      string
-	ClientKey      clientkey.Key
-	PublicModel    string
-	Prompt         string
-	ImageURLs      []string
-	Count          int
-	Resolution     string
+	RequestID       string
+	ClientKey       clientkey.Key
+	PublicModel     string
+	Prompt          string
+	ImageURLs       []string
+	Count           int
+	Resolution      string
 	ClientType      string
 	ClientUserAgent string
 	ClientIP        string
-	ResponseFormat string
+	ResponseFormat  string
 }
 
 func (s *Service) GenerateImage(ctx context.Context, input ImageGenerationInput) (*Result, error) {
@@ -1041,6 +1084,74 @@ func (b *finalizingBody) Close() error {
 		b.finalize()
 	}
 	return err
+}
+
+// peekReadCloser peeks the first non-empty chunk so empty 2xx bodies can fail over
+// before headers/body are committed to the client.
+type peekReadCloser struct {
+	io.ReadCloser
+	buf   []byte
+	err   error
+	ready bool
+}
+
+func newPeekReadCloser(inner io.ReadCloser) *peekReadCloser {
+	return &peekReadCloser{ReadCloser: inner}
+}
+
+func (p *peekReadCloser) empty() (bool, error) {
+	if p.ready {
+		return len(p.buf) == 0, p.err
+	}
+	p.ready = true
+	buf := make([]byte, 4096)
+	for {
+		n, err := p.ReadCloser.Read(buf)
+		if n > 0 {
+			// Keep only non-whitespace to treat blank SSE keepalives carefully:
+			// any byte means "not empty".
+			p.buf = append([]byte(nil), buf[:n]...)
+			p.err = err
+			return false, nil
+		}
+		if err != nil {
+			p.err = err
+			if errors.Is(err, io.EOF) {
+				return true, err
+			}
+			return true, err
+		}
+	}
+}
+
+func (p *peekReadCloser) Read(dest []byte) (int, error) {
+	if !p.ready {
+		if empty, err := p.empty(); empty {
+			if err == nil {
+				err = io.EOF
+			}
+			return 0, err
+		}
+	}
+	if len(p.buf) > 0 {
+		n := copy(dest, p.buf)
+		p.buf = p.buf[n:]
+		if len(p.buf) == 0 && p.err != nil {
+			err := p.err
+			p.err = nil
+			if n > 0 {
+				// Deliver buffered bytes first; surface error on the next Read.
+				if errors.Is(err, io.EOF) {
+					return n, nil
+				}
+				p.err = err
+				return n, nil
+			}
+			return 0, err
+		}
+		return n, nil
+	}
+	return p.ReadCloser.Read(dest)
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

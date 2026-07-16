@@ -39,7 +39,9 @@ const (
 	maxJSONResponseTransferBytes   = 128 << 20
 	maxStreamResponseTransferBytes = 256 << 20
 	maxMediaResponseTransferBytes  = int64(2) << 30
-	responseWriteTimeout           = 30 * time.Second
+	// Per-chunk write deadline. Long generations may pause between tokens; 30s was too aggressive
+	// and caused mid-stream disconnects ("说着说着突然断").
+	responseWriteTimeout = 5 * time.Minute
 )
 
 var errResponseTransferLimit = errors.New("响应超过代理安全上限")
@@ -947,9 +949,59 @@ func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream boo
 	if err != nil {
 		if errors.Is(err, errResponseTransferLimit) {
 			errorCode = "response_too_large"
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			errorCode = "stream_interrupted"
 		} else {
 			errorCode = "stream_interrupted"
 		}
+		// If headers/body already started, best-effort emit a terminal SSE error so clients
+		// do not hang waiting for [DONE] / message_stop after an upstream drop.
+		if stream && c.Writer.Written() {
+			writeStreamInterruptTrailer(c, result.StatusCode, errorCode, err)
+		}
+	}
+}
+
+// writeStreamInterruptTrailer emits a protocol-appropriate terminal error event after a mid-stream drop.
+func writeStreamInterruptTrailer(c *gin.Context, status int, code string, cause error) {
+	message := "上游响应中断"
+	if errors.Is(cause, context.Canceled) {
+		message = "请求已取消"
+	} else if errors.Is(cause, context.DeadlineExceeded) {
+		message = "请求超时"
+	} else if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		// Keep public message short; do not leak internal dial details.
+		message = "上游响应中断，请重试"
+	}
+	_ = code
+	_ = status
+	path := c.Request.URL.Path
+	if path == "/Anthropic/messages" || path == "/anthropic/messages" || path == "/v1/messages" || strings.HasSuffix(path, "/messages") {
+		payload, _ := json.Marshal(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": message,
+			},
+		})
+		_, _ = c.Writer.Write([]byte("event: error\ndata: " + string(payload) + "\n\n"))
+		if f, ok := c.Writer.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+	// OpenAI Chat / Responses SSE style.
+	payload, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    "server_error",
+			"code":    "stream_interrupted",
+		},
+	})
+	_, _ = c.Writer.Write([]byte("data: " + string(payload) + "\n\n"))
+	_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
+	if f, ok := c.Writer.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
