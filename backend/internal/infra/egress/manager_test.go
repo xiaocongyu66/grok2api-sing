@@ -214,7 +214,7 @@ type mutableEgressRepository struct {
 }
 
 func (r *mutableEgressRepository) ListEgressNodes(_ context.Context, scope domain.Scope, _ repository.SortQuery) ([]domain.Node, error) {
-	if scope != "" && r.node.Scope != scope {
+	if scope != "" && !r.node.MatchesScope(scope) {
 		return nil, nil
 	}
 	return []domain.Node{r.node}, nil
@@ -254,7 +254,7 @@ func (r *countingEgressRepository) ListEgressNodes(ctx context.Context, scope do
 func (s egressRepositoryTestStub) ListEgressNodes(_ context.Context, scope domain.Scope, _ repository.SortQuery) ([]domain.Node, error) {
 	values := make([]domain.Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
-		if scope == "" || node.Scope == scope {
+		if scope == "" || node.MatchesScope(scope) {
 			values = append(values, node)
 		}
 	}

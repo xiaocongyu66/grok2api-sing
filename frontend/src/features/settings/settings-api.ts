@@ -280,18 +280,43 @@ const decodeSettingsSnapshot = createObjectDecoder<SettingsSnapshotDTO>("setting
 });
 // Keep strict-ish probe validators; list/report use resilient normalizers so one
 // unexpected field (or historical scope typo) cannot blank the entire page.
-const egressScopeValidator = isOneOf(...EGRESS_SCOPES);
-const egressProbeValidator = hasShape({
-  nodeId: isStringOrNumber, name: isString, scope: egressScopeValidator, ok: isBoolean,
-  latencyMs: isNumber, status: isOptional(isNumber), error: isOptional(isString), proxyUsed: isBoolean, checkedAt: isString,
-});
-const decodeEgressProbe = createObjectDecoder<EgressProbeDTO>("egress probe", {
-  nodeId: isStringOrNumber, name: isString, scope: egressScopeValidator, ok: isBoolean,
-  latencyMs: isNumber, status: isOptional(isNumber), error: isOptional(isString), proxyUsed: isBoolean, checkedAt: isString,
-});
-const decodeEgressProbeBatch = createObjectDecoder<EgressProbeBatchDTO>("egress probe batch", {
-  items: isArrayOf(egressProbeValidator), total: isNumber, passed: isNumber, failed: isNumber,
-});
+function normalizeEgressProbe(raw: unknown): EgressProbeDTO | null {
+  if (!isObject(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const nodeId = coerceString(record.nodeId);
+  const name = coerceString(record.name);
+  if (!nodeId || !name) return null;
+  return {
+    nodeId,
+    name,
+    scope: coerceScope(record.scope),
+    ok: coerceBoolean(record.ok),
+    latencyMs: coerceNumber(record.latencyMs),
+    status: typeof record.status === "number" ? record.status : undefined,
+    error: typeof record.error === "string" ? record.error : undefined,
+    proxyUsed: coerceBoolean(record.proxyUsed),
+    checkedAt: coerceString(record.checkedAt, new Date().toISOString()),
+  };
+}
+
+const decodeEgressProbe: ApiDecoder<EgressProbeDTO> = (value) => {
+  const probe = normalizeEgressProbe(value);
+  if (!probe) throw new Error("egress probe response shape is invalid");
+  return probe;
+};
+
+const decodeEgressProbeBatch: ApiDecoder<EgressProbeBatchDTO> = (value) => {
+  if (!isObject(value)) throw new Error("egress probe batch response shape is invalid");
+  const record = value as Record<string, unknown>;
+  const itemsRaw = Array.isArray(record.items) ? record.items : [];
+  const items = itemsRaw.map(normalizeEgressProbe).filter((item): item is EgressProbeDTO => item !== null);
+  return {
+    items,
+    total: coerceNumber(record.total, items.length),
+    passed: coerceNumber(record.passed, items.filter((item) => item.ok).length),
+    failed: coerceNumber(record.failed, items.filter((item) => !item.ok).length),
+  };
+};
 
 export function getSettings(): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", {}, decodeSettingsSnapshot);

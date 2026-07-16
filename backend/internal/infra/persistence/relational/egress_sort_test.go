@@ -70,3 +70,59 @@ func TestInitializeSchemaRemovesAndRejectsLegacyAllEgressNodes(t *testing.T) {
 		t.Fatal("all-scope node passed the database constraint")
 	}
 }
+
+
+func TestEgressRepositoryPersistsAndMatchesMultiScopes(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "egress-scopes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewEgressRepository(database)
+	created, err := repo.CreateEgressNode(ctx, egress.Node{
+		Name: "multi", Scope: egress.ScopeBuild, Scopes: []egress.Scope{egress.ScopeBuild, egress.ScopeWeb, egress.ScopeConsole},
+		Enabled: true, Health: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := created.EffectiveScopes(); len(got) != 3 {
+		t.Fatalf("scopes = %#v", got)
+	}
+	// Primary remains build for sort index.
+	if created.Scope != egress.ScopeBuild {
+		t.Fatalf("primary = %s", created.Scope)
+	}
+	for _, scope := range []egress.Scope{egress.ScopeBuild, egress.ScopeWeb, egress.ScopeConsole} {
+		values, err := repo.ListEgressNodes(ctx, scope, repository.SortQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, value := range values {
+			if value.ID == created.ID {
+				found = true
+				if len(value.EffectiveScopes()) != 3 {
+					t.Fatalf("loaded scopes = %#v", value.EffectiveScopes())
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("node not listed for scope %s", scope)
+		}
+	}
+	// Unrelated scope should not match.
+	values, err := repo.ListEgressNodes(ctx, egress.ScopeWebAsset, repository.SortQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		if value.ID == created.ID {
+			t.Fatal("web_asset should not match multi node without that scope")
+		}
+	}
+}

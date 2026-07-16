@@ -16,7 +16,15 @@ func NewEgressRepository(db *Database) *EgressRepository { return &EgressReposit
 func (r *EgressRepository) ListEgressNodes(ctx context.Context, scope egress.Scope, sort repository.SortQuery) ([]egress.Node, error) {
 	query := r.db.db.WithContext(ctx).Model(&egressNodeModel{})
 	if scope != "" {
-		query = query.Where("scope = ?", scope)
+		// Match primary scope or any multi-select entry stored in scopes CSV.
+		// scopes is comma-separated; bound with commas so "grok_web" does not match "grok_web_asset".
+		query = query.Where(
+			"scope = ? OR scopes = ? OR scopes LIKE ? OR scopes LIKE ? OR scopes LIKE ?",
+			scope, string(scope),
+			string(scope)+",%",
+			"%,"+string(scope),
+			"%,"+string(scope)+",%",
+		)
 	}
 	var rows []egressNodeModel
 	query = applyStableSort(query, sort, map[string]sortSpec{
@@ -82,8 +90,13 @@ func (r *EgressRepository) DeleteEgressNode(ctx context.Context, id uint64) erro
 }
 
 func toEgressDomain(row egressNodeModel) egress.Node {
+	scopes := parseScopesCSV(row.ScopesCSV, row.Scope)
+	primary := egress.Scope(row.Scope)
+	if primary == "" && len(scopes) > 0 {
+		primary = scopes[0]
+	}
 	return egress.Node{
-		ID: row.ID, Name: row.Name, Scope: egress.Scope(row.Scope), Enabled: row.Enabled,
+		ID: row.ID, Name: row.Name, Scope: primary, Scopes: scopes, Enabled: row.Enabled,
 		EncryptedProxyURL: row.EncryptedProxyURL, UserAgent: row.UserAgent, EncryptedCloudflareCookie: row.EncryptedCloudflareCookie,
 		Health: row.Health, FailureCount: row.FailureCount, CooldownUntil: row.CooldownUntil, LastError: row.LastError,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
@@ -95,12 +108,65 @@ func fromEgressDomain(value egress.Node) egressNodeModel {
 	if health == 0 && value.ID == 0 {
 		health = 1
 	}
+	scopes := value.EffectiveScopes()
+	primary := string(value.Scope)
+	if primary == "" && len(scopes) > 0 {
+		primary = string(scopes[0])
+	}
 	return egressNodeModel{
-		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Scope: primary, ScopesCSV: encodeScopesCSV(scopes), Enabled: value.Enabled,
 		EncryptedProxyURL: value.EncryptedProxyURL, UserAgent: value.UserAgent, EncryptedCloudflareCookie: value.EncryptedCloudflareCookie,
 		Health: health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
+}
+
+func parseScopesCSV(raw, primary string) []egress.Scope {
+	seen := make(map[egress.Scope]struct{})
+	out := make([]egress.Scope, 0, 4)
+	push := func(item string) {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			return
+		}
+		scope := egress.Scope(item)
+		if !scope.IsValid() {
+			return
+		}
+		if _, ok := seen[scope]; ok {
+			return
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	if strings.TrimSpace(raw) != "" {
+		for _, part := range strings.Split(raw, ",") {
+			push(part)
+		}
+	}
+	if len(out) == 0 {
+		push(primary)
+	}
+	return out
+}
+
+func encodeScopesCSV(scopes []egress.Scope) string {
+	if len(scopes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(scopes))
+	seen := make(map[egress.Scope]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if !scope.IsValid() {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		parts = append(parts, string(scope))
+	}
+	return strings.Join(parts, ",")
 }
 
 func validateEgressNode(value egress.Node) error {

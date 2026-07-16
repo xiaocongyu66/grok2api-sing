@@ -85,7 +85,15 @@ type cachedNodeSnapshot struct {
 	expiresAt time.Time
 }
 
-const defaultProbeURL = "https://www.gstatic.com/generate_204"
+// defaultProbeURL targets xAI Build edge so one-click tests exercise the same path
+// real Grok Build traffic uses (not a generic Google 204 that some proxies block).
+const defaultProbeURL = "https://cli-chat-proxy.grok.com/"
+
+// fallbackProbeURLs are tried when the primary returns transport errors.
+var fallbackProbeURLs = []string{
+	"https://grok.com/",
+	"https://console.x.ai/",
+}
 
 func NewManager(repository repository.EgressRepository, cipher *security.Cipher) *Manager {
 	return &Manager{
@@ -422,7 +430,12 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.mu.Unlock()
 	}
 	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
-		m.invalidateNodes(value.Scope)
+		for _, scope := range value.EffectiveScopes() {
+			m.invalidateNodes(scope)
+		}
+		if len(value.EffectiveScopes()) == 0 {
+			m.invalidateNodes(value.Scope)
+		}
 	}
 }
 
@@ -490,33 +503,53 @@ func (m *Manager) probeNode(ctx context.Context, value domain.Node) (domain.Prob
 	if probeURL == "" {
 		probeURL = defaultProbeURL
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		result.Error = err.Error()
-		m.recordProbe(value.ID, false, 0, result.Error)
-		return result, nil
+	urls := []string{probeURL}
+	for _, fallback := range fallbackProbeURLs {
+		if fallback != probeURL {
+			urls = append(urls, fallback)
+		}
 	}
-	start := time.Now()
-	response, err := client.Do(request)
-	latency := time.Since(start).Milliseconds()
-	result.LatencyMs = latency
-	if err != nil {
-		result.Error = err.Error()
-		m.recordProbe(value.ID, false, latency, result.Error)
-		return result, nil
+	var lastErr string
+	var lastStatus int
+	var lastLatency int64
+	for _, target := range urls {
+		req, reqErr := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
+		if reqErr != nil {
+			lastErr = reqErr.Error()
+			continue
+		}
+		req.Header.Set("User-Agent", "grok2api-egress-probe/1.0")
+		req.Header.Set("Accept", "*/*")
+		start := time.Now()
+		response, doErr := client.Do(req)
+		latency := time.Since(start).Milliseconds()
+		lastLatency = latency
+		result.LatencyMs = latency
+		if doErr != nil {
+			lastErr = doErr.Error()
+			continue
+		}
+		_ = response.Body.Close()
+		lastStatus = response.StatusCode
+		result.Status = response.StatusCode
+		// Reachability via proxy: 2xx/3xx, and 401/403 mean xAI edge answered (auth/anti-bot).
+		if response.StatusCode >= 200 && response.StatusCode < 500 {
+			result.OK = true
+			result.Error = ""
+			m.recordProbe(value.ID, true, latency, "")
+			return result, nil
+		}
+		lastErr = fmt.Sprintf("probe status %d", response.StatusCode)
 	}
-	_ = response.Body.Close()
-	result.Status = response.StatusCode
-	// 204/200/3xx all mean the proxy path works.
-	if response.StatusCode >= 200 && response.StatusCode < 400 {
-		result.OK = true
-		m.recordProbe(value.ID, true, latency, "")
-		return result, nil
+	result.Status = lastStatus
+	result.LatencyMs = lastLatency
+	if lastErr == "" {
+		lastErr = "probe failed"
 	}
-	result.Error = fmt.Sprintf("probe status %d", response.StatusCode)
-	m.recordProbe(value.ID, false, latency, result.Error)
+	result.Error = lastErr
+	m.recordProbe(value.ID, false, lastLatency, result.Error)
 	return result, nil
 }
 
