@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
@@ -90,22 +92,39 @@ func SecurityHeaders() gin.HandlerFunc {
 	}
 }
 
-// sanitizeLogValue strips CR/LF and other control characters that could split log lines.
-func sanitizeLogValue(value string) string {
+// safeLogToken keeps only a conservative token charset so log sinks cannot be split/injected.
+func safeLogToken(value string, max int) string {
 	if value == "" {
-		return value
+		return ""
 	}
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\r', '\t':
-			return ' '
-		default:
-			if r < 0x20 || r == 0x7f {
-				return -1
-			}
-			return r
+	var b strings.Builder
+	b.Grow(min(len(value), max))
+	for _, r := range value {
+		if b.Len() >= max {
+			break
 		}
-	}, value)
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' || r == ':' || r == '/' || r == '*' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func safeClientIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	// Strip zone / port forms and accept only parseable IPs.
+	host := value
+	if h, _, err := net.SplitHostPort(value); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
 
 // AccessLog 记录路径、状态、耗时与调用方元数据，不读取请求或响应正文。
@@ -114,14 +133,7 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		startedAt := time.Now()
 		c.Next()
 		requestID, _ := c.Get(RequestIDKey)
-		path := c.FullPath()
-		if path == "" {
-			path = c.Request.URL.Path
-		}
 		userAgent := strings.TrimSpace(c.Request.UserAgent())
-		if len(userAgent) > 200 {
-			userAgent = userAgent[:200]
-		}
 		headers := map[string]string{}
 		for _, name := range []string{
 			"x-claude-code-session-id", "x-codex-window-id", "x-codex-session-id",
@@ -134,10 +146,10 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 			}
 		}
 		clientType := clientid.Detect(userAgent, headers)
-		// Prefer Gin route template (no user-controlled path segments) for logs.
+		// Only log Gin route templates (e.g. /v1/chat/completions), never raw URL.Path.
 		logPath := c.FullPath()
 		if logPath == "" {
-			logPath = sanitizeLogValue(path)
+			logPath = "-"
 		}
 		logMethod := c.Request.Method
 		switch logMethod {
@@ -145,20 +157,25 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 		default:
 			logMethod = "OTHER"
 		}
+		reqID := fmt.Sprint(requestID)
+		if !validRequestID(reqID) {
+			reqID = "-"
+		}
 		attrs := []any{
-			"request_id", sanitizeLogValue(fmt.Sprint(requestID)),
+			"request_id", reqID,
 			"method", logMethod,
 			"path", logPath,
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(startedAt).Milliseconds(),
-			"client_ip", sanitizeLogValue(c.ClientIP()),
-			"client_type", sanitizeLogValue(clientType),
-			"user_agent", sanitizeLogValue(userAgent),
+			"client_ip", safeClientIP(c.ClientIP()),
+			"client_type", safeLogToken(clientType, 64),
+			// Length only — avoid writing free-form User-Agent into logs (log-injection sink).
+			"user_agent_len", len(userAgent),
 			"bytes_out", c.Writer.Size(),
 		}
 		if keyValue, ok := c.Get(ClientKey); ok {
 			if key, ok := keyValue.(clientkeydomain.Key); ok {
-				attrs = append(attrs, "client_key_id", key.ID, "client_key_name", sanitizeLogValue(key.Name), "client_key_prefix", sanitizeLogValue(key.Prefix))
+				attrs = append(attrs, "client_key_id", key.ID, "client_key_name", safeLogToken(key.Name, 64), "client_key_prefix", safeLogToken(key.Prefix, 32))
 			}
 		}
 		logger.Info("http_request", attrs...)
