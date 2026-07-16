@@ -61,6 +61,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/models", h.listModels)
 	router.POST("/responses", h.createResponse)
 	router.POST("/chat/completions", h.createChatCompletion)
+	// Legacy OpenAI-style alias; prefer RegisterAnthropic (/Anthropic/messages).
 	router.POST("/messages", h.createMessage)
 	router.POST("/images/generations", h.generateImage)
 	router.POST("/images/edits", h.editImage)
@@ -69,6 +70,12 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/responses/compact", h.compactResponse)
 	router.GET("/responses/:responseId", h.getResponse)
 	router.DELETE("/responses/:responseId", h.deleteResponse)
+}
+
+// RegisterAnthropic mounts Anthropic Messages at /Anthropic/messages
+// (e.g. https://host/Anthropic/messages). Clients set ANTHROPIC_BASE_URL to https://host/Anthropic.
+func (h *Handler) RegisterAnthropic(router *gin.RouterGroup) {
+	router.POST("/messages", h.createMessage)
 }
 
 type responsesRequest struct {

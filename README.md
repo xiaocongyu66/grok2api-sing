@@ -205,7 +205,7 @@ Authorization: Bearer g2a_xxx_xxx
 | `GET` | `/v1/responses/{id}` | 查询 Response |
 | `DELETE` | `/v1/responses/{id}` | 删除 Response |
 | `POST` | `/v1/chat/completions` | Chat Completions JSON / SSE |
-| `POST` | `/v1/messages` | Anthropic Messages JSON / SSE |
+| `POST` | `/Anthropic/messages` | Anthropic Messages JSON / SSE |
 | `POST` | `/v1/images/generations` | 图片生成 |
 | `POST` | `/v1/images/edits` | 图片编辑 |
 | `GET` | `/v1/media/images/{id}` | 公开归档图片 |

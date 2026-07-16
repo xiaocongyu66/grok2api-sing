@@ -127,7 +127,7 @@ func clientErrorMessage(err error) string {
 }
 
 func writeOpenAIError(c *gin.Context, status int, code, message string) {
-	if c.Request.URL.Path == "/v1/messages" {
+	if isAnthropicMessagesPath(c.Request.URL.Path) {
 		errorType := "authentication_error"
 		if status == http.StatusTooManyRequests {
 			errorType = "rate_limit_error"
@@ -138,4 +138,9 @@ func writeOpenAIError(c *gin.Context, status int, code, message string) {
 		return
 	}
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": "invalid_request_error", "code": code, "param": nil}})
+}
+
+func isAnthropicMessagesPath(path string) bool {
+	path = strings.TrimSpace(path)
+	return path == "/Anthropic/messages" || path == "/anthropic/messages" || path == "/v1/messages"
 }

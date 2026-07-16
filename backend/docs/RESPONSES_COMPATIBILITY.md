@@ -14,7 +14,7 @@
 | `DELETE /v1/responses/{response_id}` | Build / Web | 上游删除成功后移除本地归属 |
 | `GET /v1/models` | Supported | 返回管理端已启用且账号池具备服务能力的公开模型路由 |
 | `POST /v1/chat/completions` | Build / Web / Console | xAI Chat Completions JSON 与 SSE；支持函数工具，Web Lite 图片模型支持 `image_config` |
-| `POST /v1/messages` | Build / Web / Console | Anthropic Messages JSON 与 SSE；支持客户端工具、`tool_use` 和 `tool_result` |
+| `POST /Anthropic/messages` | Build / Web / Console | Anthropic Messages JSON 与 SSE；支持客户端工具、`tool_use` 和 `tool_result` |
 | `POST /v1/images/generations` | Grok Web | Lite Chat 生图与 Imagine WebSocket 生图，支持 `n`、URL 与 Base64 |
 | `POST /v1/images/edits` | Grok Web | 官方 JSON `image.url`/`images[].url` 图片编辑 |
 | `GET /v1/media/images/{id}` | Public asset | 读取生成后归档到本地媒体存储的不可变图片 |
@@ -104,7 +104,7 @@ Codex 的可见 `agent_message` 与 `mcp_tool_call_output` 会保留为 develope
 
 Chat Completions 与 Messages 都先转换为标准 Responses 输入项。Build 与 Console 将其发送到各自的 Responses 上游，并把 JSON/SSE 转回调用方协议；Web 再把同一规范输入转换为 app-chat 对话载荷。不支持的音频、Files API、Anthropic server tools，以及 Web/Console `/responses/compact` 会返回明确错误，不会静默丢弃。
 
-Anthropic Messages 使用 `POST /v1/messages`，要求 `anthropic-version`，客户端密钥可通过 `x-api-key` 或 `Authorization: Bearer` 提供。返回使用 Anthropic `message` 对象；流式事件依次为 `message_start`、`content_block_*`、`message_delta` 和 `message_stop`。由于上游不是 Claude，模型 ID 仍使用本平台公开 Grok 模型名称。
+Anthropic Messages 使用 `POST /Anthropic/messages`，要求 `anthropic-version`，客户端密钥可通过 `x-api-key` 或 `Authorization: Bearer` 提供。返回使用 Anthropic `message` 对象；流式事件依次为 `message_start`、`content_block_*`、`message_delta` 和 `message_stop`。由于上游不是 Claude，模型 ID 仍使用本平台公开 Grok 模型名称。
 
 Messages 转换层兼容 Claude Code 常见载荷：标准顶层 `system` 与误放在 `messages` 数组中的 `system`/`developer` 都会按原顺序合并为 Responses `instructions`，不会再因 `role: "system"` 返回 400。请求固定使用 `store: false`；`metadata.user_id` 映射为 `safety_identifier`。`thinking.enabled`/`thinking.adaptive` 会依据 `budget_tokens` 和 effort 映射到 Grok reasoning，并请求 `reasoning.encrypted_content`；JSON 与 SSE 会恢复 `thinking_delta`、`signature_delta`、`thinking` 或 `redacted_thinking`，便于下一轮原样回放，不伪造签名。
 

@@ -148,22 +148,30 @@ func New(deps Dependencies) *gin.Engine {
 	egresshttp.NewHandler(deps.Egress).Register(adminProtected)
 	systemhttp.NewHandler(deps.PublicAPIBaseURL).Register(adminProtected)
 
-	v1 := router.Group("/v1")
-	if deps.TrafficReady != nil {
-		v1.Use(func(c *gin.Context) {
-			if deps.TrafficReady() {
-				c.Next()
-				return
-			}
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-				"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
-			}})
-		})
+	trafficGate := func(c *gin.Context) {
+		if deps.TrafficReady == nil || deps.TrafficReady() {
+			c.Next()
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
+			"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
+		}})
 	}
+
+	v1 := router.Group("/v1")
+	v1.Use(trafficGate)
 	v1.Use(middleware.ClientAuthWithConnections(deps.ClientKeys, deps.Connections))
 	inferenceHandler := inference.NewHandler(deps.Gateway, deps.Models, deps.MaxBodyBytes)
 	inferenceHandler.SetPromptCacheAffinity(deps.PromptCacheAffinity)
 	inferenceHandler.Register(v1)
+
+	// Anthropic-compatible base path: {origin}/Anthropic/messages
+	// Claude Code / SDK: ANTHROPIC_BASE_URL=https://host/Anthropic
+	anthropic := router.Group("/Anthropic")
+	anthropic.Use(trafficGate)
+	anthropic.Use(middleware.ClientAuthWithConnections(deps.ClientKeys, deps.Connections))
+	inferenceHandler.RegisterAnthropic(anthropic)
+
 	registerFrontend(router, deps.FrontendStaticPath)
 	return router
 }

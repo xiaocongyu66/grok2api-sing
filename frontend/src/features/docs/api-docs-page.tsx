@@ -188,7 +188,8 @@ export function ApiDocsPage() {
   if (!definition) return <Navigate to="/docs/chat/completions" replace />;
 
   const publicApiBaseUrl = systemQuery.data?.publicApiBaseURL || runtimeConfig.publicApiBaseUrl;
-  const baseUrl = `${publicApiBaseUrl.replace(/\/$/, "")}/v1`;
+  const origin = publicApiBaseUrl.replace(/\/$/, "");
+  const baseUrl = definition.key === "chat/messages" ? `${origin}/Anthropic` : `${origin}/v1`;
   const availableModels = (modelsQuery.data?.items ?? []).filter((model) => model.enabled && model.available && definition.capabilities.includes(model.capability));
   const selectedModelAvailable = availableModels.some((model) => model.publicId === selectedModel);
   const exampleModel = (selectedModelAvailable ? selectedModel : availableModels[0]?.publicId) || fallbackModel(definition.key);
@@ -202,7 +203,7 @@ export function ApiDocsPage() {
           <h1 className="text-2xl font-medium text-foreground">{definition.title}</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">{t(definition.descriptionKey)}</p>
         </div>
-        <EndpointSignature method={definition.method} path={`/v1${definition.path}`} />
+        <EndpointSignature method={definition.method} path={`${definition.key === "chat/messages" ? "/Anthropic" : "/v1"}${definition.path}`} />
       </header>
 
       <div className="space-y-10">
@@ -327,9 +328,10 @@ function createExamples(definition: EndpointDefinition, baseUrl: string, model: 
         `response.raise_for_status()`,
         `print(response.json())`,
         ``,
-        `# Claude Code / Anthropic SDK style (set ANTHROPIC_BASE_URL to this gateway /v1):`,
+        `# Claude Code / Anthropic SDK:`,
         `#   export ANTHROPIC_BASE_URL="${baseUrl}"`,
         `#   export ANTHROPIC_API_KEY="g2a_your_api_key"`,
+        `#   # full endpoint = ${baseUrl}/messages`,
         `#   # model must be a public Grok model id from this gateway, not claude-*`,
       ].join("\n"),
       javascript: [

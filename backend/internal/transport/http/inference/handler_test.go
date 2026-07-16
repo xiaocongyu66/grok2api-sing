@@ -134,9 +134,9 @@ func TestGatewayErrorPreservesSanitizedUpstreamClassification(t *testing.T) {
 func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(nil, nil, 1<<20).Register(router.Group("/v1"))
+	NewHandler(nil, nil, 1<<20).RegisterAnthropic(router.Group("/Anthropic"))
 
-	missingVersion := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
+	missingVersion := httptest.NewRequest(http.MethodPost, "/Anthropic/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
 	missingVersion.Header.Set("Content-Type", "application/json")
 	missingRecorder := httptest.NewRecorder()
 	router.ServeHTTP(missingRecorder, missingVersion)
@@ -144,7 +144,7 @@ func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 		t.Fatalf("missing version status=%d body=%s", missingRecorder.Code, missingRecorder.Body.String())
 	}
 
-	valid := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
+	valid := httptest.NewRequest(http.MethodPost, "/Anthropic/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`))
 	valid.Header.Set("Content-Type", "application/json")
 	valid.Header.Set("anthropic-version", "2023-06-01")
 	validRecorder := httptest.NewRecorder()
@@ -153,7 +153,7 @@ func TestMessagesEndpointUsesAnthropicContract(t *testing.T) {
 		t.Fatalf("valid shape status=%d body=%s", validRecorder.Code, validRecorder.Body.String())
 	}
 
-	zeroTokens := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`))
+	zeroTokens := httptest.NewRequest(http.MethodPost, "/Anthropic/messages", strings.NewReader(`{"model":"grok-4.5","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`))
 	zeroTokens.Header.Set("Content-Type", "application/json")
 	zeroTokens.Header.Set("anthropic-version", "2023-06-01")
 	zeroRecorder := httptest.NewRecorder()
