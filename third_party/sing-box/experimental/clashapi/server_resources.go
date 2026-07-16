@@ -101,6 +101,10 @@ func (s *Server) downloadZIP(body io.Reader, output string) error {
 	}
 	defer reader.Close()
 	trimDir := zipIsInSingleDirectory(reader.File)
+	outputRoot, err := filepath.Abs(output)
+	if err != nil {
+		return err
+	}
 	for _, file := range reader.File {
 		if file.FileInfo().IsDir() {
 			continue
@@ -109,15 +113,29 @@ func (s *Server) downloadZIP(body io.Reader, output string) error {
 		if trimDir {
 			pathElements = pathElements[1:]
 		}
-		saveDirectory := output
-		if len(pathElements) > 1 {
-			saveDirectory = filepath.Join(saveDirectory, filepath.Join(pathElements[:len(pathElements)-1]...))
+		if len(pathElements) == 0 {
+			continue
 		}
-		err = os.MkdirAll(saveDirectory, 0o755)
-		if err != nil {
+		// Reject Zip Slip: no absolute paths, drive letters, or ".." segments.
+		safe := true
+		for _, element := range pathElements {
+			if element == "" || element == "." || element == ".." || strings.Contains(element, `\`) || strings.Contains(element, ":") {
+				safe = false
+				break
+			}
+		}
+		if !safe {
+			return E.New("invalid zip entry path: ", file.Name)
+		}
+		relPath := filepath.Join(pathElements...)
+		savePath := filepath.Join(outputRoot, relPath)
+		// Ensure the resolved path stays under outputRoot (CodeQL Zip Slip guard).
+		if !strings.HasPrefix(savePath, outputRoot+string(os.PathSeparator)) && savePath != outputRoot {
+			return E.New("zip entry escapes destination: ", file.Name)
+		}
+		if err = os.MkdirAll(filepath.Dir(savePath), 0o755); err != nil {
 			return err
 		}
-		savePath := filepath.Join(saveDirectory, pathElements[len(pathElements)-1])
 		err = downloadZIPEntry(s.ctx, file, savePath)
 		if err != nil {
 			return err

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -78,8 +79,8 @@ func ResolveSocketByProcSearch(network string, source, _ netip.AddrPort) int32 {
 		}
 
 		if strings.EqualFold(local, fields[netIndexOfLocal]) {
-			uid, err := strconv.Atoi(fields[netIndexOfUid])
-			if err != nil {
+			uid, err := strconv.ParseInt(fields[netIndexOfUid], 10, 32)
+			if err != nil || uid < 0 || uid > math.MaxInt32 {
 				return -1
 			}
 

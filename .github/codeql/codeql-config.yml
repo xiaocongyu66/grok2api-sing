@@ -1,0 +1,6 @@
+name: "grok2api-sing CodeQL"
+
+# Default security-and-quality pack; source-level suppressions handle protocol false positives
+# (e.g. Trojan SHA224 wire-key derivation is not password storage).
+queries:
+  - uses: security-and-quality

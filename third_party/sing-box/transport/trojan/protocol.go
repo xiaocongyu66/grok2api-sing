@@ -160,8 +160,11 @@ func (c *ClientPacketConn) Upstream() any {
 	return c.Conn
 }
 
+// Key derives the Trojan protocol key as hex(SHA224(password)).
+// This is wire identity material required by the Trojan spec, not password storage/auth hashing.
 func Key(password string) [KeyLength]byte {
 	var key [KeyLength]byte
+	// codeql[go/weak-sensitive-data-hashing]: Trojan wire key is defined as hex(SHA224(password)), not password storage.
 	hash := sha256.New224()
 	common.Must1(hash.Write([]byte(password)))
 	hex.Encode(key[:], hash.Sum(nil))

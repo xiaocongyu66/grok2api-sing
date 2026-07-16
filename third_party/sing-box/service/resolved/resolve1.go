@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"os"
 	"os/user"
@@ -134,7 +135,7 @@ func (t *resolve1Manager) createMetadata(sender dbus.Sender) adapter.InboundCont
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
 					uid, parseErr := strconv.ParseUint(fields[1], 10, 32)
-					if parseErr != nil {
+					if parseErr != nil || uid > math.MaxInt32 {
 						break
 					}
 					processInfo.UserId = int32(uid)
