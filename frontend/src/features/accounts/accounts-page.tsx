@@ -1,41 +1,9 @@
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link2, MoreHorizontal, Pencil, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { useForm, useWatch } from "react-hook-form";
-import { useTranslation } from "react-i18next";
-import { toast } from "sonner";
-import { z } from "zod";
-
-import { CopyButton } from "@/shared/components/copy-button";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Spinner } from "@/components/ui/spinner";
-import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ApiError } from "@/shared/api/client";
-import { EmptyState, ErrorState, LoadingState, TableLoadingRow } from "@/shared/components/data-state";
-import { DataTableShell } from "@/shared/components/data-table-shell";
-import { DataTableFilters } from "@/shared/components/data-table-filters";
-import { Pagination } from "@/shared/components/pagination";
-import { SortableTableHead } from "@/shared/components/sortable-table-head";
-import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
-import { cn } from "@/shared/lib/cn";
-import { formatDateTime, formatNumber } from "@/shared/lib/format";
-import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 import {
+  convertWebAccountsToBuild,
+  dedupSSOByEmail,
   deleteAccount,
   deleteAccounts,
-  convertWebAccountsToBuild,
+  deleteFailedAccounts,
   exportAccounts,
   getAccountSummary,
   importAccounts,
@@ -44,9 +12,9 @@ import {
   listAccounts,
   pollDeviceAuthorization,
   refreshAccountBilling,
+  refreshAccountQuota,
   refreshAccountsQuota,
   refreshAccountToken,
-  refreshAccountQuota,
   refreshAllAccountBilling,
   refreshAllAccountTokens,
   refreshAllConsoleAccountQuotas,
@@ -55,16 +23,20 @@ import {
   syncWebAccountsToConsole,
   updateAccount,
   updateAccountsEnabled,
+  validateAccounts,
+  validateAllEnabledAccounts,
+  validatePreselectedAccounts,
   type AccountDTO,
   type AccountProvider,
-  type AccountUpdateInput,
   type AccountTaskProgressDTO,
+  type AccountUpdateInput,
   type BuildConversionInput,
   type BuildConversionStrategy,
-  type WebConsoleSyncInput,
   type DeviceSessionDTO,
   type QuotaDTO,
+  type WebConsoleSyncInput,
 } from "@/features/accounts/accounts-api";
+
 import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/account-quota";
 
 function isAbortError(error: unknown): boolean {
@@ -96,6 +68,15 @@ export function AccountsPage() {
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [deleteFailedOpen, setDeleteFailedOpen] = useState(false);
+  const [validateAllOpen, setValidateAllOpen] = useState(false);
+  const [validatePreselectOpen, setValidatePreselectOpen] = useState(false);
+  const [dedupOpen, setDedupOpen] = useState(false);
+  const [dedupProgress, setDedupProgress] = useState<AccountTaskProgressDTO | null>(null);
+  const [validateProgress, setValidateProgress] = useState<AccountTaskProgressDTO | null>(null);
+  const [validateMode, setValidateMode] = useState<"all" | "preselect" | "selected">("all");
+  const dedupAbortRef = useRef<AbortController | null>(null);
+  const validateAbortRef = useRef<AbortController | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
@@ -359,6 +340,83 @@ export function AccountsPage() {
     onError: showError,
   });
 
+  const deleteFailedMutation = useMutation({
+    // Include disabled so attention-side issues (reauth + disabled) are purged; quota recovering accounts are kept.
+    mutationFn: () => deleteFailedAccounts(provider, true),
+    onSuccess: (result) => {
+      setDeleteFailedOpen(false);
+      setSelected(new Set());
+      invalidateAccountData();
+      if (result.deleted <= 0) {
+        toast.message(t("accounts.failedDeletedNone"));
+      } else {
+        toast.success(t("accounts.failedDeleted", { count: result.deleted }));
+      }
+    },
+    onError: showError,
+  });
+
+  const dedupMutation = useMutation({
+    mutationFn: () => {
+      const controller = new AbortController();
+      dedupAbortRef.current = controller;
+      setDedupProgress({ completed: 0, total: 0 });
+      return dedupSSOByEmail(provider, setDedupProgress, controller.signal);
+    },
+    onSuccess: (result) => {
+      setDedupOpen(false);
+      setSelected(new Set());
+      invalidateAccountData();
+      toast.success(t("accounts.dedupCompleted", {
+        groups: result.groups,
+        kept: result.kept,
+        deleted: result.deleted,
+        rateLimited: result.keptRateLimited,
+        noEmail: result.skippedNoEmail,
+      }));
+    },
+    onError: (error) => {
+      if (!isAbortError(error)) showError(error);
+    },
+    onSettled: () => {
+      dedupAbortRef.current = null;
+      setDedupProgress(null);
+    },
+  });
+
+  const validateMutation = useMutation({
+    mutationFn: (input: { mode: "selected"; ids: string[] } | { mode: "all" } | { mode: "preselect" }) => {
+      const controller = new AbortController();
+      validateAbortRef.current = controller;
+      if (input.mode === "all") {
+        setValidateProgress({ completed: 0, total: 0 });
+        return validateAllEnabledAccounts(provider, setValidateProgress, controller.signal);
+      }
+      if (input.mode === "preselect") {
+        setValidateProgress({ completed: 0, total: 5 });
+        return validatePreselectedAccounts(provider, 5, setValidateProgress, controller.signal);
+      }
+      setValidateProgress({ completed: 0, total: input.ids.length });
+      return validateAccounts(input.ids, provider, setValidateProgress, controller.signal);
+    },
+    onSuccess: (result) => {
+      setSelected(new Set());
+      setValidateAllOpen(false);
+      setValidatePreselectOpen(false);
+      if (typeof result.preselected === "number" && typeof result.poolSize === "number" && result.preselected < result.poolSize) {
+        toast.success(t("accounts.validatePreselectCompleted", result));
+      } else {
+        toast.success(t("accounts.validateCompleted", result));
+      }
+    },
+    onError: (error) => { if (!isAbortError(error)) showError(error); },
+    onSettled: () => {
+      validateAbortRef.current = null;
+      setValidateProgress(null);
+      invalidateAccountData();
+    },
+  });
+
   useEffect(() => {
     if (!deviceOpen || !deviceSession || deviceStatus !== "pending") {
       return;
@@ -497,12 +555,15 @@ export function AccountsPage() {
   const recoveringAccounts = summary?.recovering ?? 0;
   const attentionAccounts = summary?.attention ?? 0;
   const abnormalAccounts = recoveringAccounts + attentionAccounts;
-  const buildSummary = summary?.providers.grok_build ?? { total: 0, available: 0 };
-  const webSummary = summary?.providers.grok_web ?? { total: 0, available: 0 };
-  const consoleSummary = summary?.providers.grok_console ?? { total: 0, available: 0 };
+  const buildSummary = summary?.providers.grok_build ?? { total: 0, available: 0, reauthRequired: 0, disabled: 0 };
+  const webSummary = summary?.providers.grok_web ?? { total: 0, available: 0, reauthRequired: 0, disabled: 0 };
+  const consoleSummary = summary?.providers.grok_console ?? { total: 0, available: 0, reauthRequired: 0, disabled: 0 };
   const summaryLoading = summaryQuery.isPending;
   const summaryUnavailable = summaryQuery.isError;
   const providerAccountTotal = provider === "grok_build" ? buildSummary.total : provider === "grok_web" ? webSummary.total : consoleSummary.total;
+  const providerReauthCount = summary?.providers[provider]?.reauthRequired ?? 0;
+  const providerDisabledCount = summary?.providers[provider]?.disabled ?? 0;
+  const providerFailedCount = providerReauthCount + providerDisabledCount;
   const hasProviderAccounts = providerAccountTotal > 0 || (result?.total ?? 0) > 0;
   const bulkTaskPending = quotaSyncMutation.isPending
     || allTokenMutation.isPending
@@ -511,7 +572,7 @@ export function AccountsPage() {
     || importMutation.isPending
     || batchUpdateMutation.isPending
     || batchBillingMutation.isPending
-    || batchDeleteMutation.isPending;
+    || batchDeleteMutation.isPending || deleteFailedMutation.isPending || dedupMutation.isPending || validateMutation.isPending;
 
   return (
     <div className="space-y-8">
@@ -589,6 +650,11 @@ export function AccountsPage() {
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openBuildConversion([...selected])}>{t("accounts.convertToBuild")}</Button> : null}
                 {provider === "grok_web" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConsoleSync([...selected])}>{t("webConsoleSync.action")}</Button> : null}
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchBillingMutation.mutate()}>{t("accountCredential.quotaSyncAction")}</Button>
+                <Button variant="secondary" size="sm" disabled={bulkTaskPending || validateMutation.isPending} onClick={() => validateMutation.mutate({ mode: "selected", ids: [...selected] })}>
+                  {validateMutation.isPending && validateProgress
+                    ? t("accounts.validatingProgress", validateProgress)
+                    : t("accounts.validateSelected")}
+                </Button>
                 <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={bulkTaskPending} onClick={() => setBatchDeleteOpen(true)}>{t("common.delete")}</Button>
               </div>
             ) : (
@@ -597,6 +663,30 @@ export function AccountsPage() {
                 {provider === "grok_web" && webSummary.total > 0 ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => openWebConsoleSync("all")}>{t("webConsoleSync.allAction")}</Button> : null}
                 {hasProviderAccounts ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setSyncAllOpen(true)}>{t("accountCredential.quotaSyncAction")}</Button> : null}
                 {hasProviderAccounts && provider === "grok_build" ? <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => setRenewAllOpen(true)}>{t("accountCredential.refreshAction")}</Button> : null}
+                {hasProviderAccounts ? (
+                  <>
+                    <Button variant="secondary" size="sm" disabled={bulkTaskPending || validateMutation.isPending} onClick={() => setValidatePreselectOpen(true)}>
+                      {validateMutation.isPending && validateProgress
+                        ? t("accounts.validatingProgress", validateProgress)
+                        : t("accounts.validatePreselect")}
+                    </Button>
+                    <Button variant="secondary" size="sm" disabled={bulkTaskPending || validateMutation.isPending} onClick={() => setValidateAllOpen(true)}>
+                      {t("accounts.validateAllEnabled")}
+                    </Button>
+                  </>
+                ) : null}
+                {hasProviderAccounts && providerFailedCount > 0 ? (
+                  <Button variant="secondary" size="sm" className="text-destructive" disabled={bulkTaskPending || deleteFailedMutation.isPending} onClick={() => setDeleteFailedOpen(true)}>
+                    {deleteFailedMutation.isPending ? <Spinner /> : t("accounts.deleteFailed", { count: providerFailedCount })}
+                  </Button>
+                ) : null}
+                {hasProviderAccounts && (provider === "grok_web" || provider === "grok_console") ? (
+                  <Button variant="secondary" size="sm" disabled={bulkTaskPending || dedupMutation.isPending} onClick={() => setDedupOpen(true)}>
+                    {dedupMutation.isPending && dedupProgress
+                      ? t("accounts.dedupProgress", dedupProgress)
+                      : t("accounts.dedupSSO")}
+                  </Button>
+                ) : null}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild><Button size="sm">{t("accounts.connectAccount")}</Button></DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
@@ -850,6 +940,82 @@ export function AccountsPage() {
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.deleteTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.deleteDescription")}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => deleting && deleteMutation.mutate(deleting.id)}>{t("common.delete")}</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+            <AlertDialog open={deleteFailedOpen} onOpenChange={setDeleteFailedOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("accounts.deleteFailedTitle", { count: providerFailedCount })}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("accounts.deleteFailedDescription", {
+                reauth: providerReauthCount,
+                disabled: providerDisabledCount,
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteFailedMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              disabled={deleteFailedMutation.isPending}
+              onClick={(event) => {
+                event.preventDefault();
+                deleteFailedMutation.mutate();
+              }}
+            >
+              {deleteFailedMutation.isPending ? <Spinner /> : t("accounts.deleteFailedConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={dedupOpen} onOpenChange={(open) => {
+        if (!open && dedupMutation.isPending) dedupAbortRef.current?.abort();
+        setDedupOpen(open);
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("accounts.dedupTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("accounts.dedupDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          {dedupProgress ? <p className="text-xs text-muted-foreground">{t("accounts.dedupProgress", dedupProgress)}</p> : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={dedupMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction disabled={dedupMutation.isPending} onClick={() => dedupMutation.mutate()}>
+              {dedupMutation.isPending ? <Spinner /> : t("accounts.dedupConfirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={validateAllOpen} onOpenChange={(open) => { if (!open) validateAbortRef.current?.abort(); setValidateAllOpen(open); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("accounts.validateAllTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("accounts.validateAllDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction disabled={validateMutation.isPending} onClick={(event) => { event.preventDefault(); validateMutation.mutate({ mode: "all" }); }}>
+              {validateMutation.isPending ? <><Spinner />{validateProgress ? <span className="tabular-nums">{validateProgress.completed} / {validateProgress.total || "…"}</span> : t("common.loading")}</> : t("accounts.validateAllEnabled")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={validatePreselectOpen} onOpenChange={(open) => { if (!open) validateAbortRef.current?.abort(); setValidatePreselectOpen(open); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("accounts.validatePreselectTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("accounts.validatePreselectDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction disabled={validateMutation.isPending} onClick={(event) => { event.preventDefault(); validateMutation.mutate({ mode: "preselect" }); }}>
+              {validateMutation.isPending ? <><Spinner />{validateProgress ? <span className="tabular-nums">{validateProgress.completed} / {validateProgress.total || "…"}</span> : t("common.loading")}</> : t("accounts.validatePreselect")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 

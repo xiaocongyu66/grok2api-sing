@@ -97,12 +97,19 @@ export type AccountUpdateInput = {
   minimumRemaining: number;
 };
 
+export type AccountProviderSummaryDTO = {
+  total: number;
+  available: number;
+  reauthRequired: number;
+  disabled: number;
+};
+
 export type AccountSummaryDTO = {
   total: number;
   available: number;
   recovering: number;
   attention: number;
-  providers: Record<AccountProvider, { total: number; available: number }>;
+  providers: Record<AccountProvider, AccountProviderSummaryDTO>;
   recovery: { cooldown: number; waitingReset: number; probing: number };
   issues: { disabled: number; reauthRequired: number };
 };
@@ -161,7 +168,7 @@ const decodeAccount = createValidatedDecoder<AccountDTO>("account", accountValid
 const decodeAccountPage = createPaginatedDecoder<AccountDTO>(accountValidator);
 const decodeAccountSummary = createObjectDecoder<AccountSummaryDTO>("account summary", {
   total: isNumber, available: isNumber, recovering: isNumber, attention: isNumber,
-  providers: isRecordOf(hasShape({ total: isNumber, available: isNumber })),
+  providers: isRecordOf(hasShape({ total: isNumber, available: isNumber, reauthRequired: isNumber, disabled: isNumber })),
   recovery: hasShape({ cooldown: isNumber, waitingReset: isNumber, probing: isNumber }),
   issues: hasShape({ disabled: isNumber, reauthRequired: isNumber }),
 });
@@ -258,7 +265,30 @@ export type AccountImportResultDTO = {
 
 export type WebConsoleSyncResultDTO = AccountImportResultDTO & { skipped: number };
 
-type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO> & {
+export type AccountValidateResultDTO = {
+  total: number;
+  healthy: number;
+  failed: number;
+  skipped: number;
+  marked: number;
+  preselected?: number;
+  poolSize?: number;
+  sampledIds?: string[];
+};
+
+
+export type SSOEmailDedupResultDTO = {
+  groups: number;
+  probed: number;
+  kept: number;
+  deleted: number;
+  keptRateLimited: number;
+  skippedNoEmail: number;
+  single: number;
+};
+
+
+type AccountTaskStreamPayload = Partial<BuildConversionResultDTO & AccountTaskProgressDTO & AccountTokenRefreshResultDTO & AccountImportResultDTO & AccountValidateResultDTO & SSOEmailDedupResultDTO> & {
   code?: string;
   message?: string;
 };
@@ -267,6 +297,10 @@ const decodeAccountTaskStreamPayload = createObjectDecoder<AccountTaskStreamPayl
   created: isOptional(isNumber), linked: isOptional(isNumber), skipped: isOptional(isNumber), failed: isOptional(isNumber),
   synced: isOptional(isNumber), syncFailed: isOptional(isNumber), completed: isOptional(isNumber), total: isOptional(isNumber),
   phase: isOptional(isOneOf("importing", "converting", "syncing")), updated: isOptional(isNumber), succeeded: isOptional(isNumber),
+  healthy: isOptional(isNumber), marked: isOptional(isNumber), preselected: isOptional(isNumber), poolSize: isOptional(isNumber),
+  groups: isOptional(isNumber), probed: isOptional(isNumber), kept: isOptional(isNumber), deleted: isOptional(isNumber),
+  keptRateLimited: isOptional(isNumber), skippedNoEmail: isOptional(isNumber), single: isOptional(isNumber),
+  sampledIds: isOptional(isArrayOf(isString)),
   code: isOptional(isString), message: isOptional(isString),
 });
 
@@ -402,6 +436,34 @@ export function deleteAccounts(ids: string[], provider: AccountProvider): Promis
   return apiRequest("/api/admin/v1/accounts", { method: "DELETE", body: { ids, provider } }, decodeCountResult<{ deleted: number }>("deleted"));
 }
 
+
+
+export function deleteFailedAccounts(provider: AccountProvider, includeDisabled = true): Promise<{ deleted: number }> {
+  // Default includeDisabled=true: matches "attention" issues (reauth + disabled), not quota-recovering accounts.
+  return apiRequest("/api/admin/v1/accounts/failed", { method: "DELETE", body: { provider, includeDisabled } }, decodeCountResult<{ deleted: number }>("deleted"));
+}
+
+const validateResultFields = ["total", "healthy", "failed", "skipped", "marked"] as const;
+
+export function validateAccounts(ids: string[], provider: AccountProvider, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountValidateResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/batch/validate", { ids, provider }, [...validateResultFields], onProgress, signal);
+}
+
+export function validateAllEnabledAccounts(provider: AccountProvider, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountValidateResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/batch/validate", { all: true, provider }, [...validateResultFields], onProgress, signal);
+}
+
+/** Preselect ~5 (or fewer if pool is smaller) high-priority enabled accounts and probe them. */
+export function validatePreselectedAccounts(provider: AccountProvider, limit = 5, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountValidateResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/batch/validate", { preselect: true, limit, provider }, [...validateResultFields], onProgress, signal);
+}
+
+const dedupResultFields = ["groups", "probed", "kept", "deleted", "keptRateLimited", "skippedNoEmail", "single"] as const;
+
+/** Deduplicate SSO accounts by email: keep usable tokens (incl. 429), delete dead ones. */
+export function dedupSSOByEmail(provider: AccountProvider, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<SSOEmailDedupResultDTO> {
+  return runAccountTask("/api/admin/v1/accounts/batch/dedup-sso-email", { provider }, [...dedupResultFields], onProgress, signal);
+}
 export function startDeviceAuthorization(): Promise<DeviceSessionDTO> {
   return apiRequest("/api/admin/v1/accounts/device/start", { method: "POST" }, decodeDeviceSession);
 }

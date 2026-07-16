@@ -220,8 +220,10 @@ type Summary struct {
 }
 
 type ProviderSummary struct {
-	Total     int64
-	Available int64
+	Total          int64
+	Available      int64
+	ReauthRequired int64
+	Disabled       int64
 }
 
 type RecoverySummary struct {
@@ -252,7 +254,10 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 		result.Recovery.Probing += row.Probing
 		result.Issues.Disabled += row.Disabled
 		result.Issues.ReauthRequired += row.ReauthRequired
-		result.Providers[row.Provider] = ProviderSummary{Total: row.Total, Available: row.Available}
+		result.Providers[row.Provider] = ProviderSummary{
+			Total: row.Total, Available: row.Available,
+			ReauthRequired: row.ReauthRequired, Disabled: row.Disabled,
+		}
 	}
 	result.Recovering = result.Recovery.Cooldown + result.Recovery.WaitingReset + result.Recovery.Probing
 	result.Attention = result.Issues.Disabled + result.Issues.ReauthRequired
@@ -480,6 +485,440 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	deleted, err := s.accounts.DeleteMany(ctx, ids)
 	return deleted, mapRepositoryError(err)
 }
+
+// DeleteFailedAccounts removes reauthRequired accounts (and optionally disabled ones) for a provider.
+// Deletes in chunks so pools larger than the batch API limit still complete.
+func (s *Service) DeleteFailedAccounts(ctx context.Context, providerValue accountdomain.Provider, includeDisabled bool) (int64, error) {
+	if !providerValue.IsValid() {
+		return 0, ErrInvalidInput
+	}
+	const chunk = 500
+	const maxRounds = 20000 // safety: 20000 * 500 = 10M rows
+	var deleted int64
+	for round := 0; round < maxRounds; round++ {
+		if err := ctx.Err(); err != nil {
+			return deleted, err
+		}
+		// Fetch one batch at a time so multi-thousand failed pools do not hit the 500-ID cap.
+		ids, err := s.accounts.ListFailedAccountIDs(ctx, providerValue, includeDisabled, chunk)
+		if err != nil {
+			return deleted, err
+		}
+		if len(ids) == 0 {
+			if s.logger != nil {
+				s.logger.Info("delete_failed_accounts_done", "provider", providerValue, "include_disabled", includeDisabled, "deleted", deleted, "rounds", round)
+			}
+			return deleted, nil
+		}
+		n, err := s.BatchDelete(ctx, ids)
+		deleted += n
+		if s.logger != nil {
+			s.logger.Info("delete_failed_accounts_chunk", "provider", providerValue, "batch", len(ids), "deleted_rows", n, "total_deleted", deleted)
+		}
+		if err != nil {
+			return deleted, err
+		}
+		// Guard against infinite loop if rows cannot be deleted (FK) but still match the list query.
+		if n == 0 {
+			return deleted, fmt.Errorf("%w: 匹配到 %d 个失效账号但无法删除（可能被 media_jobs 等外键占用）", ErrInvalidInput, len(ids))
+		}
+		if len(ids) < chunk {
+			if s.logger != nil {
+				s.logger.Info("delete_failed_accounts_done", "provider", providerValue, "include_disabled", includeDisabled, "deleted", deleted, "rounds", round+1)
+			}
+			return deleted, nil
+		}
+	}
+	return deleted, fmt.Errorf("%w: 删除失效账号超过安全轮次上限", ErrInvalidInput)
+}
+
+// SSOEmailDedupResult summarizes email-based SSO token deduplication.
+type SSOEmailDedupResult struct {
+	Groups          int // email groups with 2+ accounts
+	Probed          int
+	Kept            int
+	Deleted         int
+	KeptRateLimited int // kept despite 429 / transient rate limit
+	SkippedNoEmail  int
+	Single          int // emails with only one account (no action)
+}
+
+// DeduplicateSSOByEmail groups SSO accounts by email within a provider.
+// For each email with multiple different tokens:
+//   - probe each credential;
+//   - keep usable ones (including 429/rate-limit as usable);
+//   - if at least one is usable, delete only the permanently dead duplicates;
+//   - if none are usable, delete the entire email group.
+//
+// Accounts without email are skipped (import email:token to populate).
+func (s *Service) DeduplicateSSOByEmail(ctx context.Context, providerValue accountdomain.Provider, progress BatchProgressObserver) (SSOEmailDedupResult, error) {
+	if !providerValue.IsValid() {
+		return SSOEmailDedupResult{}, ErrInvalidInput
+	}
+	if providerValue != accountdomain.ProviderWeb && providerValue != accountdomain.ProviderConsole {
+		return SSOEmailDedupResult{}, invalidInput("邮箱去重仅支持 Grok Web / Console SSO 号池")
+	}
+	values, err := s.accounts.ListSSOAccountsForDedup(ctx, providerValue)
+	if err != nil {
+		return SSOEmailDedupResult{}, err
+	}
+	byEmail := make(map[string][]accountdomain.Credential)
+	result := SSOEmailDedupResult{}
+	for _, value := range values {
+		email := strings.ToLower(strings.TrimSpace(value.Email))
+		if email == "" {
+			// Fall back to name when it looks like an email (email:token import stores name=email).
+			if candidate := strings.ToLower(strings.TrimSpace(value.Name)); strings.Contains(candidate, "@") && !strings.ContainsAny(candidate, " \t") {
+				email = candidate
+			}
+		}
+		if email == "" {
+			result.SkippedNoEmail++
+			continue
+		}
+		byEmail[email] = append(byEmail[email], value)
+	}
+
+	type emailGroup struct {
+		email string
+		items []accountdomain.Credential
+	}
+	groups := make([]emailGroup, 0)
+	for email, items := range byEmail {
+		if len(items) < 2 {
+			result.Single++
+			continue
+		}
+		// Collapse identical SourceKey/token hashes first — same token stored twice.
+		unique := uniqueSSOBySourceKey(items)
+		if len(unique) < 2 {
+			// Same token duplicated rows: keep one, delete rest without probing.
+			keep := unique[0].ID
+			var remove []uint64
+			for _, item := range items {
+				if item.ID != keep {
+					remove = append(remove, item.ID)
+				}
+			}
+			if n, delErr := s.deleteAccountIDsChunked(ctx, remove); delErr != nil {
+				return result, delErr
+			} else {
+				result.Deleted += int(n)
+				result.Kept++
+				result.Groups++
+			}
+			continue
+		}
+		groups = append(groups, emailGroup{email: email, items: unique})
+	}
+	result.Groups += len(groups)
+	if progress != nil {
+		_ = progress(0, len(groups))
+	}
+	completed := 0
+	for _, group := range groups {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		var keep []uint64
+		var drop []uint64
+		var rateLimited int
+		for _, item := range group.items {
+			result.Probed++
+			outcome := s.classifySSOProbe(ctx, item)
+			switch outcome {
+			case ssoProbeUsable:
+				keep = append(keep, item.ID)
+			case ssoProbeRateLimited:
+				keep = append(keep, item.ID)
+				rateLimited++
+			default:
+				drop = append(drop, item.ID)
+			}
+		}
+		if len(keep) == 0 {
+			// All dead → delete entire group.
+			all := make([]uint64, 0, len(group.items))
+			for _, item := range group.items {
+				all = append(all, item.ID)
+			}
+			n, delErr := s.deleteAccountIDsChunked(ctx, all)
+			result.Deleted += int(n)
+			if delErr != nil {
+				return result, delErr
+			}
+		} else {
+			result.Kept += len(keep)
+			result.KeptRateLimited += rateLimited
+			n, delErr := s.deleteAccountIDsChunked(ctx, drop)
+			result.Deleted += int(n)
+			if delErr != nil {
+				return result, delErr
+			}
+		}
+		completed++
+		if progress != nil {
+			if err := progress(completed, len(groups)); err != nil {
+				return result, err
+			}
+		}
+	}
+	return result, nil
+}
+
+type ssoProbeOutcome int
+
+const (
+	ssoProbeUsable ssoProbeOutcome = iota
+	ssoProbeRateLimited
+	ssoProbeDead
+)
+
+func (s *Service) classifySSOProbe(ctx context.Context, value accountdomain.Credential) ssoProbeOutcome {
+	// Always live-probe: reauthRequired may be stale after re-import of a good token.
+	// 429 / rate-limit / network blips count as usable (keep).
+	probeErr := s.probeAccountUpstream(ctx, value)
+	if probeErr == nil {
+		return ssoProbeUsable
+	}
+	if isRateLimitOrTransient(probeErr) {
+		return ssoProbeRateLimited
+	}
+	if permanentCredentialError(probeErr) || errors.Is(probeErr, provider.ErrUnauthorized) {
+		_ = s.MarkReauthRequired(context.WithoutCancel(ctx), value.ID, "sso email dedup: credential rejected")
+		return ssoProbeDead
+	}
+	// Unknown transient (network): keep to be safe (same spirit as 429).
+	s.logger.Warn("sso_email_dedup_transient", "account_id", value.ID, "email", value.Email, "error", probeErr)
+	return ssoProbeRateLimited
+}
+
+func (s *Service) deleteAccountIDsChunked(ctx context.Context, ids []uint64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	const chunk = 500
+	var deleted int64
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		n, err := s.BatchDelete(ctx, ids[start:end])
+		deleted += n
+		if err != nil {
+			return deleted, err
+		}
+	}
+	return deleted, nil
+}
+
+// AccountValidationResult summarizes a batch credential probe.
+type AccountValidationResult struct {
+	Total       int
+	Healthy     int
+	Failed      int
+	Skipped     int
+	Marked      int // newly marked reauthRequired
+	Deleted     int // unused; reserved for future auto-delete option
+	AccountID   []uint64
+	Preselected int      // how many accounts were sampled for this run
+	PoolSize    int      // enabled active pool size before sampling
+	SampledIDs  []uint64 // accounts actually probed
+}
+
+// ValidateAllEnabledAccounts probes every enabled account for a provider.
+func (s *Service) ValidateAllEnabledAccounts(ctx context.Context, providerValue accountdomain.Provider, progress BatchProgressObserver) (AccountValidationResult, error) {
+	if !providerValue.IsValid() {
+		return AccountValidationResult{}, ErrInvalidInput
+	}
+	ids, err := s.accounts.ListEnabledAccountIDs(ctx, providerValue, false)
+	if err != nil {
+		return AccountValidationResult{}, err
+	}
+	result, err := s.ValidateAccounts(ctx, ids, progress)
+	if err != nil {
+		return result, err
+	}
+	result.Preselected = len(ids)
+	result.PoolSize = len(ids)
+	result.SampledIDs = append([]uint64(nil), ids...)
+	return result, nil
+}
+
+// ValidatePreselectedAccounts samples at least limit (default 5) enabled+active accounts
+// for an upstream probe. If the pool is smaller than limit, the entire pool is tested.
+// Selection prefers higher priority accounts (same order as ListEnabledAccountIDs).
+func (s *Service) ValidatePreselectedAccounts(ctx context.Context, providerValue accountdomain.Provider, limit int, progress BatchProgressObserver) (AccountValidationResult, error) {
+	if !providerValue.IsValid() {
+		return AccountValidationResult{}, ErrInvalidInput
+	}
+	if limit <= 0 {
+		limit = DefaultPreselectValidateCount
+	}
+	ids, err := s.accounts.ListEnabledAccountIDs(ctx, providerValue, false)
+	if err != nil {
+		return AccountValidationResult{}, err
+	}
+	sampled := samplePreselectIDs(ids, limit)
+	poolSize := len(ids)
+	if len(sampled) == 0 {
+		if progress != nil {
+			_ = progress(0, 0)
+		}
+		return AccountValidationResult{PoolSize: poolSize, Preselected: 0}, nil
+	}
+	result, err := s.ValidateAccounts(ctx, sampled, progress)
+	if err != nil {
+		return result, err
+	}
+	result.Preselected = len(sampled)
+	result.PoolSize = poolSize
+	result.SampledIDs = sampled
+	return result, nil
+}
+
+// ValidateAccounts probes selected accounts for live upstream usability.
+// Failed credentials are marked reauthRequired so convert/routing skip them.
+func (s *Service) ValidateAccounts(ctx context.Context, ids []uint64, progress BatchProgressObserver) (AccountValidationResult, error) {
+	ids, err := normalizeIDs(ids, maxCredentialExportAccounts)
+	if err != nil {
+		return AccountValidationResult{}, err
+	}
+	if progress != nil {
+		if err := progress(0, len(ids)); err != nil {
+			return AccountValidationResult{}, err
+		}
+	}
+	type outcome struct {
+		id      uint64
+		healthy bool
+		skipped bool
+		marked  bool
+		err     error
+	}
+	completed := 0
+	var progressMu sync.Mutex
+	var progressErr error
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results, summary, runErr := batch.MapObserved(runCtx, ids, batch.Options{Workers: s.syncPool.Limit(), Pool: s.syncPool}, func(workCtx context.Context, id uint64) (outcome, error) {
+		healthy, marked, skipped, validateErr := s.validateAccount(workCtx, id)
+		return outcome{id: id, healthy: healthy, marked: marked, skipped: skipped, err: validateErr}, nil
+	}, func(_ int, execution batch.Result[outcome]) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		completed++
+		if progress != nil {
+			if err := progress(completed, len(ids)); err != nil && progressErr == nil {
+				progressErr = err
+				cancel()
+			}
+		}
+	})
+	s.logBatchSummary("account_validate", s.syncPool, summary, runErr)
+	result := AccountValidationResult{Total: len(ids)}
+	for index, execution := range results {
+		item := execution.Value
+		if execution.Err != nil {
+			item.id = ids[index]
+			item.err = execution.Err
+		}
+		if item.skipped {
+			result.Skipped++
+			continue
+		}
+		if item.err != nil || !item.healthy {
+			result.Failed++
+			if item.marked {
+				result.Marked++
+			}
+			continue
+		}
+		result.Healthy++
+	}
+	if runErr != nil {
+		return result, runErr
+	}
+	if progressErr != nil {
+		return result, progressErr
+	}
+	return result, nil
+}
+
+func (s *Service) validateAccount(ctx context.Context, id uint64) (healthy bool, marked bool, skipped bool, err error) {
+	value, err := s.accounts.Get(ctx, id)
+	if err != nil {
+		return false, false, false, mapRepositoryError(err)
+	}
+	if !value.Enabled {
+		return false, false, true, nil
+	}
+	if value.AuthStatus == accountdomain.AuthStatusReauthRequired {
+		// Already known-failed; count as failed without another upstream hit.
+		return false, false, false, nil
+	}
+	value, err = s.EnsureCredential(ctx, value, false)
+	if err != nil {
+		if permanentCredentialError(err) {
+			if markErr := s.MarkReauthRequired(context.WithoutCancel(ctx), id, "credential validation failed"); markErr == nil {
+				return false, true, false, nil
+			}
+		}
+		return false, false, false, err
+	}
+	probeErr := s.probeAccountUpstream(ctx, value)
+	if probeErr == nil {
+		return true, false, false, nil
+	}
+	if permanentCredentialError(probeErr) || errors.Is(probeErr, provider.ErrUnauthorized) {
+		if markErr := s.MarkReauthRequired(context.WithoutCancel(ctx), id, "upstream validation rejected credential"); markErr == nil {
+			return false, true, false, nil
+		}
+		return false, false, false, probeErr
+	}
+	// Transient errors: leave account active but report failed for this pass.
+	s.logger.Warn("account_validation_transient_failure", "account_id", id, "error", probeErr)
+	return false, false, false, nil
+}
+
+func permanentCredentialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, provider.ErrUnauthorized) {
+		return true
+	}
+	var refreshErr *provider.CredentialRefreshError
+	if errors.As(err, &refreshErr) && refreshErr.Permanent {
+		return true
+	}
+	return false
+}
+
+func (s *Service) probeAccountUpstream(ctx context.Context, value accountdomain.Credential) error {
+	operationCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	// Prefer live quota for Web/Console (hits /rest/rate-limits). Prefer ListModels for Build OAuth.
+	// Never use ConvertToBuild as a probe — that would mint Build credentials.
+	if value.Provider == accountdomain.ProviderWeb || value.Provider == accountdomain.ProviderConsole {
+		if quota, ok := s.providers.Quota(value.Provider); ok {
+			_, err := quota.SyncQuota(operationCtx, value)
+			return err
+		}
+	}
+	if models, ok := s.providers.Models(value.Provider); ok {
+		_, err := models.ListModels(operationCtx, value)
+		return err
+	}
+	if quota, ok := s.providers.Quota(value.Provider); ok {
+		_, err := quota.SyncQuota(operationCtx, value)
+		return err
+	}
+	return fmt.Errorf("Provider %s 未注册可用性探测能力", value.Provider)
+}
+
+
 
 func (s *Service) Get(ctx context.Context, id uint64) (View, error) {
 	value, err := s.accounts.Get(ctx, id)

@@ -143,6 +143,9 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/accounts/refresh-tokens", h.refreshAllTokens)
 	router.POST("/accounts/batch/refresh-billing", h.batchRefreshBilling)
 	router.POST("/accounts/batch/refresh-quotas", h.batchRefreshQuotas)
+	router.POST("/accounts/batch/validate", h.batchValidate)
+	router.POST("/accounts/batch/dedup-sso-email", h.dedupSSOEmail)
+	router.DELETE("/accounts/failed", h.deleteFailed)
 	router.PATCH("/accounts/batch", h.batchUpdate)
 	router.DELETE("/accounts", h.batchDelete)
 	router.PATCH("/accounts/:id", h.update)
@@ -173,6 +176,46 @@ type batchDeleteRequest struct {
 	IDs      []string `json:"ids" binding:"required"`
 	Provider string   `json:"provider" binding:"required"`
 }
+
+type deleteFailedRequest struct {
+	Provider        string `json:"provider" binding:"required"`
+	IncludeDisabled bool   `json:"includeDisabled"`
+}
+
+type batchValidateRequest struct {
+	IDs       []string `json:"ids"`
+	Provider  string   `json:"provider" binding:"required"`
+	All       bool     `json:"all"`
+	Preselect bool     `json:"preselect"`
+	// Limit is the preselect sample size (default 5). If fewer accounts remain, all are tested.
+	Limit int `json:"limit"`
+}
+
+type dedupSSOEmailRequest struct {
+	Provider string `json:"provider" binding:"required"`
+}
+
+type dedupSSOEmailResponse struct {
+	Groups          int `json:"groups"`
+	Probed          int `json:"probed"`
+	Kept            int `json:"kept"`
+	Deleted         int `json:"deleted"`
+	KeptRateLimited int `json:"keptRateLimited"`
+	SkippedNoEmail  int `json:"skippedNoEmail"`
+	Single          int `json:"single"`
+}
+
+type accountValidateResponse struct {
+	Total       int      `json:"total"`
+	Healthy     int      `json:"healthy"`
+	Failed      int      `json:"failed"`
+	Skipped     int      `json:"skipped"`
+	Marked      int      `json:"marked"`
+	Preselected int      `json:"preselected,omitempty"`
+	PoolSize    int      `json:"poolSize,omitempty"`
+	SampledIDs  []string `json:"sampledIds,omitempty"`
+}
+
 
 type buildConversionRequest struct {
 	IDs      []string                           `json:"ids"`
@@ -353,9 +396,9 @@ func (h *Handler) summary(c *gin.Context) {
 	response.Success(c, http.StatusOK, gin.H{
 		"total": value.Total, "available": value.Available, "recovering": value.Recovering, "attention": value.Attention,
 		"providers": gin.H{
-			string(accountdomain.ProviderBuild):   gin.H{"total": build.Total, "available": build.Available},
-			string(accountdomain.ProviderWeb):     gin.H{"total": web.Total, "available": web.Available},
-			string(accountdomain.ProviderConsole): gin.H{"total": console.Total, "available": console.Available},
+			string(accountdomain.ProviderBuild): gin.H{"total": build.Total, "available": build.Available, "reauthRequired": build.ReauthRequired, "disabled": build.Disabled},
+			string(accountdomain.ProviderWeb): gin.H{"total": web.Total, "available": web.Available, "reauthRequired": web.ReauthRequired, "disabled": web.Disabled},
+			string(accountdomain.ProviderConsole): gin.H{"total": console.Total, "available": console.Available, "reauthRequired": console.ReauthRequired, "disabled": console.Disabled},
 		},
 		"recovery": gin.H{"cooldown": value.Recovery.Cooldown, "waitingReset": value.Recovery.WaitingReset, "probing": value.Recovery.Probing},
 		"issues":   gin.H{"disabled": value.Issues.Disabled, "reauthRequired": value.Issues.ReauthRequired},
@@ -1100,6 +1143,113 @@ func parseIDs(values []string) ([]uint64, error) {
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+func (h *Handler) deleteFailed(c *gin.Context) {
+	var request deleteFailedRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	providerValue := accountdomain.Provider(request.Provider)
+	if !providerValue.IsValid() {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
+		return
+	}
+	deleted, err := h.service.DeleteFailedAccounts(c.Request.Context(), providerValue, request.IncludeDisabled)
+	if err != nil {
+		h.writeServiceError(c, "accountDeleteFailed", err, http.StatusInternalServerError, "删除失败账号失败")
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
+}
+func (h *Handler) dedupSSOEmail(c *gin.Context) {
+	var request dedupSSOEmailRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	providerValue := accountdomain.Provider(request.Provider)
+	if !providerValue.IsValid() {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
+		return
+	}
+	stream := newAccountEventStream(c)
+	defer stream.Close()
+	result, err := h.service.DeduplicateSSOByEmail(c.Request.Context(), providerValue, stream.ProgressObserver())
+	if err != nil {
+		stream.WriteError("accountDedupFailed", err.Error())
+		return
+	}
+	_ = stream.Write("complete", dedupSSOEmailResponse{
+		Groups: result.Groups, Probed: result.Probed, Kept: result.Kept, Deleted: result.Deleted,
+		KeptRateLimited: result.KeptRateLimited, SkippedNoEmail: result.SkippedNoEmail, Single: result.Single,
+	})
+}
+func (h *Handler) batchValidate(c *gin.Context) {
+	var request batchValidateRequest
+	if c.ShouldBindJSON(&request) != nil {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	modes := 0
+	if request.All {
+		modes++
+	}
+	if request.Preselect {
+		modes++
+	}
+	if len(request.IDs) > 0 {
+		modes++
+	}
+	if modes != 1 {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请只选择：指定账号、全部验证或预选测号 其中一种")
+		return
+	}
+	providerValue := accountdomain.Provider(request.Provider)
+	if !providerValue.IsValid() {
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Provider 无效")
+		return
+	}
+	stream := newAccountEventStream(c)
+	defer stream.Close()
+	var (
+		result accountapp.AccountValidationResult
+		err    error
+	)
+	switch {
+	case request.All:
+		result, err = h.service.ValidateAllEnabledAccounts(c.Request.Context(), providerValue, stream.ProgressObserver())
+	case request.Preselect:
+		result, err = h.service.ValidatePreselectedAccounts(c.Request.Context(), providerValue, request.Limit, stream.ProgressObserver())
+	default:
+		ids, parseErr := parseIDs(request.IDs)
+		if parseErr != nil {
+			stream.WriteError("invalidId", parseErr.Error())
+			return
+		}
+		if !h.validateProviderIDs(c, ids, request.Provider) {
+			return
+		}
+		result, err = h.service.ValidateAccounts(c.Request.Context(), ids, stream.ProgressObserver())
+		if err == nil {
+			result.Preselected = len(ids)
+			result.PoolSize = len(ids)
+			result.SampledIDs = append([]uint64(nil), ids...)
+		}
+	}
+	if err != nil {
+		stream.WriteError("accountValidateFailed", "批量验证账号失败")
+		return
+	}
+	sampled := make([]string, 0, len(result.SampledIDs))
+	for _, id := range result.SampledIDs {
+		sampled = append(sampled, strconv.FormatUint(id, 10))
+	}
+	_ = stream.Write("complete", accountValidateResponse{
+		Total: result.Total, Healthy: result.Healthy, Failed: result.Failed, Skipped: result.Skipped, Marked: result.Marked,
+		Preselected: result.Preselected, PoolSize: result.PoolSize, SampledIDs: sampled,
+	})
 }
 
 func (h *Handler) validateProviderIDs(c *gin.Context, ids []uint64, providerValue string) bool {

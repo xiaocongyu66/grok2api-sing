@@ -28,6 +28,10 @@ type AccountRepository interface {
 	Summarize(ctx context.Context, now time.Time) ([]AccountSummary, error)
 	ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error)
 	ListEnabledAccountIDs(ctx context.Context, provider account.Provider, refreshableOnly bool) ([]uint64, error)
+	// ListFailedAccountIDs returns IDs of reauthRequired (and optionally disabled) accounts for bulk cleanup.
+	ListFailedAccountIDs(ctx context.Context, provider account.Provider, includeDisabled bool, limit int) ([]uint64, error)
+	// ListSSOAccountsForDedup returns SSO credentials for a provider (enabled or not) with email/token fields for dedup.
+	ListSSOAccountsForDedup(ctx context.Context, provider account.Provider) ([]account.Credential, error)
 	// FilterMissingBuildConversionIDs 从指定账号中排除已经关联 Build 的 Web 账号。
 	FilterMissingBuildConversionIDs(ctx context.Context, ids []uint64) ([]uint64, error)
 	// ListUnlinkedWebAccountIDs 以 ID 游标取未关联 Web 账号；total 仅在 afterID 为 0 时返回。

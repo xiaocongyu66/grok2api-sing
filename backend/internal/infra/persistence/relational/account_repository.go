@@ -285,6 +285,45 @@ func (r *AccountRepository) ListEnabledAccountIDs(ctx context.Context, provider 
 	return ids, err
 }
 
+func (r *AccountRepository) ListSSOAccountsForDedup(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
+	var rows []accountModel
+	err := r.db.db.WithContext(ctx).
+		Preload("Credential").
+		Preload("WebProfile").
+		Joins("JOIN account_credentials AS credential ON credential.account_id = provider_accounts.id").
+		Where("provider_accounts.provider = ? AND credential.auth_type = ?", provider, account.AuthTypeSSO).
+		Order("provider_accounts.id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toAccountDomain(row))
+	}
+	return out, nil
+}
+
+func (r *AccountRepository) ListFailedAccountIDs(ctx context.Context, provider account.Provider, includeDisabled bool, limit int) ([]uint64, error) {
+	if limit < 1 {
+		return []uint64{}, nil
+	}
+	// Use the model table directly (no alias) so Postgres/SQLite both scan IDs reliably.
+	query := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("id").Where("provider = ?", string(provider))
+	if includeDisabled {
+		query = query.Where("auth_status = ? OR enabled = ?", string(account.AuthStatusReauthRequired), false)
+	} else {
+		query = query.Where("auth_status = ?", string(account.AuthStatusReauthRequired))
+	}
+	var ids []uint64
+	err := query.Order("id ASC").Limit(limit).Scan(&ids).Error
+	if ids == nil {
+		ids = []uint64{}
+	}
+	return ids, err
+}
+
+
 func (r *AccountRepository) FilterMissingBuildConversionIDs(ctx context.Context, ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return []uint64{}, nil
