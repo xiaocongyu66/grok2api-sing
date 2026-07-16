@@ -30,11 +30,17 @@ const navigation = [
 
 const documentation = [
   {
-    label: "Chat",
+    label: "OpenAI",
     icon: MessageSquareText,
     items: [
       { href: "/docs/chat/completions", label: "Chat Completions", method: "POST" },
       { href: "/docs/chat/responses", label: "Responses", method: "POST" },
+    ],
+  },
+  {
+    label: "Anthropic",
+    icon: MessageSquareText,
+    items: [
       { href: "/docs/chat/messages", label: "Messages", method: "POST" },
     ],
   },

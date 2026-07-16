@@ -74,7 +74,7 @@ const endpoints: Record<string, EndpointDefinition> = {
     response: { id: "resp_example", object: "response", status: "completed", model: "grok-chat-fast", output: [{ type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "HTTP streaming sends response data incrementally." }] }], usage: { input_tokens: 18, output_tokens: 12, total_tokens: 30 } },
   },
   "chat/messages": {
-    key: "chat/messages", category: "Chat", title: "Messages", method: "POST", path: "/messages",
+    key: "chat/messages", category: "Anthropic", title: "Anthropic Messages", method: "POST", path: "/messages",
     descriptionKey: "docs.endpointMessages", capabilities: ["chat", "responses"],
     fields: [
       { name: "model", required: true, descriptionKey: "docs.reference.fieldModel" },
@@ -82,12 +82,41 @@ const endpoints: Record<string, EndpointDefinition> = {
       { name: "messages", required: true, descriptionKey: "docs.reference.fieldMessages" },
       { name: "system", descriptionKey: "docs.reference.fieldSystem" },
       { name: "stream", descriptionKey: "docs.reference.fieldStream" },
+      { name: "temperature", descriptionKey: "docs.reference.fieldTemperature" },
+      { name: "top_p", descriptionKey: "docs.reference.fieldTopP" },
+      { name: "stop_sequences", descriptionKey: "docs.reference.fieldStopSequences" },
+      { name: "metadata.user_id", descriptionKey: "docs.reference.fieldMetadataUserId" },
+      { name: "thinking", descriptionKey: "docs.reference.fieldThinking" },
       { name: "tools", descriptionKey: "docs.reference.fieldAnthropicTools" },
       { name: "tool_choice", descriptionKey: "docs.reference.fieldToolChoice" },
     ],
-    noteKeys: ["docs.reference.noteMessagesEvents", "docs.reference.noteMessagesLimits"],
-    request: (model) => ({ model, max_tokens: 1024, system: "You are a concise assistant.", messages: [{ role: "user", content: "Explain HTTP streaming." }], stream: false }),
-    response: { id: "msg_example", type: "message", role: "assistant", model: "grok-chat-fast", content: [{ type: "text", text: "HTTP streaming sends response data incrementally." }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 18, output_tokens: 12 } },
+    noteKeys: [
+      "docs.reference.noteMessagesAuth",
+      "docs.reference.noteMessagesClaudeCode",
+      "docs.reference.noteMessagesEvents",
+      "docs.reference.noteMessagesTools",
+      "docs.reference.noteMessagesThinking",
+      "docs.reference.noteMessagesLimits",
+      "docs.reference.noteMessagesModels",
+    ],
+    request: (model) => ({
+      model,
+      max_tokens: 1024,
+      system: "You are a concise assistant.",
+      messages: [{ role: "user", content: "Explain HTTP streaming." }],
+      stream: false,
+      metadata: { user_id: "session-demo" },
+    }),
+    response: {
+      id: "msg_example",
+      type: "message",
+      role: "assistant",
+      model: "grok-chat-fast",
+      content: [{ type: "text", text: "HTTP streaming sends response data incrementally." }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 18, output_tokens: 12, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    },
   },
   "image/generations": {
     key: "image/generations", category: "Image", title: "Image generations", method: "POST", path: "/images/generations",
@@ -181,7 +210,12 @@ export function ApiDocsPage() {
           <div className="grid gap-4 sm:grid-cols-2">
             <ConnectionItem label={t("docs.baseUrl")} value={baseUrl} />
             <ConnectionItem label={t("docs.authentication")} value={definition.key === "chat/messages" ? "x-api-key: g2a_..." : "Authorization: Bearer g2a_..."} />
-            {definition.key === "chat/messages" ? <ConnectionItem label="anthropic-version" value="2023-06-01" /> : null}
+            {definition.key === "chat/messages" ? (
+              <>
+                <ConnectionItem label={t("docs.alternateAuthentication")} value="Authorization: Bearer g2a_..." />
+                <ConnectionItem label="anthropic-version" value="2023-06-01" />
+              </>
+            ) : null}
           </div>
         </DocsSection>
 
@@ -252,6 +286,72 @@ function createExamples(definition: EndpointDefinition, baseUrl: string, model: 
   const pythonPayload = request ? `\n\npayload = json.loads(r'''${JSON.stringify(request, null, 2)}''')` : "";
   const pythonBody = request ? ",\n    json=payload" : "";
   const javascriptBody = request ? `,\n  body: JSON.stringify(${JSON.stringify(request, null, 2)})` : "";
+
+  if (messageHeaders && request) {
+    // Anthropic SDK-style examples for Claude Code / Anthropic clients.
+    const streamRequest = { ...request, stream: true };
+    return {
+      curl: [
+        `export GROK2API_API_KEY="g2a_your_api_key"`,
+        ``,
+        `# Non-streaming`,
+        `curl -X POST "${url}" \\`,
+        `  -H "x-api-key: $GROK2API_API_KEY" \\`,
+        `  -H "anthropic-version: 2023-06-01" \\`,
+        `  -H "Content-Type: application/json" \\`,
+        `  -d '${JSON.stringify(request, null, 2)}'`,
+        ``,
+        `# Streaming (SSE: message_start / content_block_* / message_delta / message_stop)`,
+        `curl -N -X POST "${url}" \\`,
+        `  -H "x-api-key: $GROK2API_API_KEY" \\`,
+        `  -H "anthropic-version: 2023-06-01" \\`,
+        `  -H "Content-Type: application/json" \\`,
+        `  -d '${JSON.stringify(streamRequest, null, 2)}'`,
+      ].join("\n"),
+      python: [
+        `import json`,
+        `import requests`,
+        ``,
+        `BASE_URL = "${baseUrl}"`,
+        `API_KEY = "g2a_your_api_key"`,
+        ``,
+        `headers = {`,
+        `    "x-api-key": API_KEY,`,
+        `    "anthropic-version": "2023-06-01",`,
+        `    "Content-Type": "application/json",`,
+        `}`,
+        ``,
+        `payload = json.loads(r'''${JSON.stringify(request, null, 2)}''')`,
+        ``,
+        `response = requests.post(f"{BASE_URL}/messages", headers=headers, json=payload, timeout=120)`,
+        `response.raise_for_status()`,
+        `print(response.json())`,
+        ``,
+        `# Claude Code / Anthropic SDK style (set ANTHROPIC_BASE_URL to this gateway /v1):`,
+        `#   export ANTHROPIC_BASE_URL="${baseUrl}"`,
+        `#   export ANTHROPIC_API_KEY="g2a_your_api_key"`,
+        `#   # model must be a public Grok model id from this gateway, not claude-*`,
+      ].join("\n"),
+      javascript: [
+        `const BASE_URL = "${baseUrl}";`,
+        `const API_KEY = "g2a_your_api_key";`,
+        ``,
+        `const response = await fetch(\`\${BASE_URL}/messages\`, {`,
+        `  method: "POST",`,
+        `  headers: {`,
+        `    "x-api-key": API_KEY,`,
+        `    "anthropic-version": "2023-06-01",`,
+        `    "Content-Type": "application/json",`,
+        `  },`,
+        `  body: JSON.stringify(${JSON.stringify(request, null, 2)}),`,
+        `});`,
+        ``,
+        `if (!response.ok) throw new Error(await response.text());`,
+        `console.log(await response.json());`,
+      ].join("\n"),
+    };
+  }
+
   return {
     curl: `export GROK2API_API_KEY="g2a_your_api_key"\n\ncurl -X ${definition.method} "${url}" \\\n${curlHeaders}${curlBody}`,
     python: `${pythonImports}${pythonPayload}\n\nresponse = requests.${definition.method.toLowerCase()}(\n    "${url}",\n    headers=${JSON.stringify(headers, null, 2)}${pythonBody}\n)\nresponse.raise_for_status()\nprint(response.json())`,
