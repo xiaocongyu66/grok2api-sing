@@ -1,3 +1,37 @@
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowRight, ClipboardPaste, Compass, Download, ExternalLink, FileUp, Link2, MoreHorizontal, Pencil, RefreshCw, RotateCw, Search, SquareTerminal, Trash2, TriangleAlert, Webhook } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useForm, useWatch } from "react-hook-form";
+import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
+import { z } from "zod";
+
+import { CopyButton } from "@/shared/components/copy-button";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Spinner } from "@/components/ui/spinner";
+import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ApiError } from "@/shared/api/client";
+import { EmptyState, ErrorState, LoadingState, TableLoadingRow } from "@/shared/components/data-state";
+import { DataTableShell } from "@/shared/components/data-table-shell";
+import { DataTableFilters } from "@/shared/components/data-table-filters";
+import { Pagination } from "@/shared/components/pagination";
+import { SortableTableHead } from "@/shared/components/sortable-table-head";
+import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
+import { cn } from "@/shared/lib/cn";
+import { formatDateTime, formatNumber } from "@/shared/lib/format";
+import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 import {
   convertWebAccountsToBuild,
   dedupSSOByEmail,
@@ -36,7 +70,6 @@ import {
   type QuotaDTO,
   type WebConsoleSyncInput,
 } from "@/features/accounts/accounts-api";
-
 import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/account-quota";
 
 function isAbortError(error: unknown): boolean {
@@ -74,7 +107,6 @@ export function AccountsPage() {
   const [dedupOpen, setDedupOpen] = useState(false);
   const [dedupProgress, setDedupProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [validateProgress, setValidateProgress] = useState<AccountTaskProgressDTO | null>(null);
-  const [validateMode, setValidateMode] = useState<"all" | "preselect" | "selected">("all");
   const dedupAbortRef = useRef<AbortController | null>(null);
   const validateAbortRef = useRef<AbortController | null>(null);
   const [exportOpen, setExportOpen] = useState(false);

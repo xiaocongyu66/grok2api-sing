@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Database, FileStack, HardDrive, Image as ImageIcon, RefreshCw, Search, Video, type LucideIcon } from "lucide-react";
+import { Database, HardDrive, Image as ImageIcon, RefreshCw, Search, Video, type LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";

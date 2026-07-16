@@ -10,7 +10,6 @@ import {
   isOneOf,
   isOptional,
   isString,
-  isStringOrNumber,
   type ApiDecoder,
 } from "@/shared/api/decoder";
 import type { SortOrder } from "@/shared/lib/table-sort";

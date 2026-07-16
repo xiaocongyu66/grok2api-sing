@@ -581,9 +581,6 @@ const resources = {
           empty: "暂无图片文件",
           noMatches: "没有匹配的图片",
           sha256: "SHA256",
-          search: "搜索 SHA256 或 ID",
-          pageSummary: "本页 {{count}} / 共 {{total}}",
-          sha256: "SHA256",
         },
         videos: {
           title: "视频库",
@@ -591,7 +588,7 @@ const resources = {
           account: "账号",
           clientKey: "客户端密钥",
           completedDetail: "已完成 {{count}}",
-          noMatches: "没有匹配的视频任务",,
+          noMatches: "没有匹配的视频任务",
           description: "查看视频生成任务进度与结果。",
           totalJobs: "任务总数",
           queued: "排队中",
