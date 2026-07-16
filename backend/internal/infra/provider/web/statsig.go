@@ -382,12 +382,12 @@ func (a *Adapter) applySignedStatsig(ctx context.Context, request *http.Request,
 	logMethod := statsigLogMethod(request.Method)
 
 	switch strings.TrimSpace(cfg.StatsigMode) {
-	case config.StatsigModeManual, "manual":
+	case config.StatsigModeManual:
 		if value := strings.TrimSpace(cfg.StatsigManualValue); validStatsigID(value) {
 			request.Header.Set("x-statsig-id", value)
 		}
 		return
-	case config.StatsigModeLocal, "local", "":
+	case config.StatsigModeLocal, "":
 		path := "/"
 		if request.URL != nil {
 			if p := request.URL.EscapedPath(); p != "" {
@@ -401,7 +401,7 @@ func (a *Adapter) applySignedStatsig(ctx context.Context, request *http.Request,
 		}
 		request.Header.Set("x-statsig-id", value)
 		return
-	case config.StatsigModeURL, "url":
+	case config.StatsigModeURL:
 		// Remote signer path (optional / legacy). Prefer local for new installs.
 	default:
 		a.log().Warn("web_statsig_unknown_mode", "mode", cfg.StatsigMode)
@@ -428,12 +428,12 @@ func (a *Adapter) applySignedStatsig(ctx context.Context, request *http.Request,
 func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential) (int, error) {
 	cfg := a.config()
 	switch strings.TrimSpace(cfg.StatsigMode) {
-	case config.StatsigModeManual, "manual":
+	case config.StatsigModeManual:
 		if !validStatsigID(strings.TrimSpace(cfg.StatsigManualValue)) {
 			return 0, fmt.Errorf("手动 Statsig 配置无效")
 		}
 		return 0, nil
-	case config.StatsigModeLocal, "local", "":
+	case config.StatsigModeLocal, "":
 		// Pure-Go signer is ready without network; touch Generate once to fail-fast on init issues.
 		if _, err := statsig.Generate("/rest/app-chat/conversations/new", http.MethodPost, time.Now().Unix()); err != nil {
 			return 0, fmt.Errorf("本地 Statsig 签名失败: %w", err)
@@ -464,7 +464,7 @@ func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential
 func (a *Adapter) invalidateSignedStatsig(method, target string) bool {
 	cfg := a.config()
 	mode := strings.TrimSpace(cfg.StatsigMode)
-	if mode == config.StatsigModeLocal || mode == "local" || mode == "" {
+	if mode == config.StatsigModeLocal || mode == "" {
 		// Local signatures are timestamped per request; nothing to invalidate.
 		return true
 	}
