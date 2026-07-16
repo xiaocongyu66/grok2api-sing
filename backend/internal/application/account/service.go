@@ -87,8 +87,7 @@ const (
 	webQuotaRefreshTimeout                    = 30 * time.Second
 	maxCredentialExportAccounts               = 10000
 	maxCredentialImportAccounts               = 10000
-	// Larger DB upsert chunks cut transaction round-trips on bulk import.
-	credentialImportChunkSize                 = 250
+	credentialImportChunkSize                 = 100
 	maxBuildConversionAccounts                = 1000
 	maxWebConsoleSyncAccounts                 = 1000
 	accountTaskBatchSize                      = 1000
@@ -759,6 +758,12 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 	seeds := make([]provider.CredentialSeed, 0)
 	seen := make(map[string]struct{})
 	parsedAccounts := 0
+	// Keep SSE alive during multi-file parse (admin UI aborts after ~60s of silence).
+	if progress != nil {
+		if err := progress(0, len(documents)); err != nil {
+			return ImportResult{}, err
+		}
+	}
 	for index, document := range documents {
 		values, err := adapter.ParseImportedCredentials(document)
 		if err != nil {
@@ -780,6 +785,11 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 				seen[key] = struct{}{}
 			}
 			seeds = append(seeds, value)
+		}
+		if progress != nil {
+			if err := progress(index+1, len(documents)); err != nil {
+				return ImportResult{}, err
+			}
 		}
 	}
 	return s.persistImportedSeeds(ctx, seeds, observer, progress)

@@ -21,7 +21,7 @@ let refreshPromise: Promise<RefreshResult> | null = null;
 const sessionInvalidatedListeners = new Set<() => void>();
 const refreshLockName = "grok2api:admin-session-refresh";
 const maxEventStreamBufferCharacters = 1 << 20;
-const eventStreamInactivityTimeoutMs = 60_000;
+const eventStreamInactivityTimeoutMs = 300_000;
 
 export type RefreshResult = "refreshed" | "invalid" | "unavailable";
 

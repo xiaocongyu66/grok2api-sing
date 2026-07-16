@@ -32,11 +32,9 @@ type accountSyncProgressor interface {
 const (
 	maxAccountImportBytes         = 30 << 20
 	maxAccountImportFiles         = 1000
-	// Buffer enough imported account IDs so DB write chunks are not blocked on
-	// slow proactive billing/quota/model sync workers (CPA default: sync off).
-	accountSyncQueueCapacity      = 256
+	accountSyncQueueCapacity      = 20
 	accountEventHeartbeatInterval = 15 * time.Second
-	accountEventWriteTimeout      = 30 * time.Second
+	accountEventWriteTimeout      = 2 * time.Minute
 )
 
 type Handler struct {
