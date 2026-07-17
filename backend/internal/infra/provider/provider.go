@@ -238,7 +238,9 @@ type ImageEditRequest struct {
 }
 
 type VideoRequest struct {
-	Credential    account.Credential
+	Credential account.Credential
+	// JobID 绑定本地视频任务，供 XAI ZDR 上传票据与结果资产关联。
+	JobID         string
 	Prompt        string
 	Duration      int
 	AspectRatio   string
@@ -250,6 +252,8 @@ type VideoRequest struct {
 type VideoResult struct {
 	URL         string
 	ContentType string
+	// AssetID 非空时表示结果已写入本地媒体资产，内容读取应走 MediaObjectStorage。
+	AssetID string
 }
 
 // RefreshedCredential 表示 OAuth 刷新后的旋转凭据。
@@ -328,6 +332,13 @@ type ImageAssetStore interface {
 type VideoAdapter interface {
 	Adapter
 	GenerateVideo(ctx context.Context, request VideoRequest) (VideoResult, error)
+}
+
+// VideoContentDownloader streams a completed provider video using the
+// credential that created the job. Callers must enforce job ownership first.
+type VideoContentDownloader interface {
+	VideoAdapter
+	DownloadVideo(ctx context.Context, credential account.Credential, rawURL string) (io.ReadCloser, string, int64, error)
 }
 
 type RoutingMetadataAdapter interface {

@@ -171,7 +171,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 
 	egressManager := infraegress.NewManager(egressRepo, cipher)
 	egressManager.SetLogger(logger)
-	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{BaseURL: cfg.Provider.Build.BaseURL, ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier, TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent}, cipher)
+	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
+		BaseURL: cfg.Provider.Build.BaseURL, FallbackBaseURL: cfg.Provider.Build.FallbackBaseURL,
+		ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier,
+		TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent,
+	}, cipher)
 	cliAdapter.SetEgress(egressManager)
 	reasoningReplay := reasoningreplay.New(reasoningReplayStore, reasoningreplay.Config{
 		Enabled: cfg.Routing.ReasoningReplayEnabled,
@@ -227,6 +231,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
 	accountService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
 	accountService.SetDBBuffer(cfg.Batch.DBBuffer)
+	// Super Build accounts may permanently fall back to XAI after a primary 403.
+	cliAdapter.SetFallbackMarker(accountService)
 	if redisRuntime != nil {
 		accountService.SetDBBufferRedis(redisRuntime.Client(), cfg.RuntimeStore.Redis.KeyPrefix)
 	}
@@ -339,9 +345,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			pool.UpdateJitter(next.Batch.RandomDelay.Value())
 		}
 		cliAdapter.UpdateConfig(cliprovider.Config{
-			BaseURL: next.Provider.Build.BaseURL, ClientVersion: next.Provider.Build.ClientVersion,
-			ClientIdentifier: next.Provider.Build.ClientIdentifier, TokenAuth: next.Provider.Build.TokenAuth,
-			UserAgent: next.Provider.Build.UserAgent,
+			BaseURL: next.Provider.Build.BaseURL, FallbackBaseURL: next.Provider.Build.FallbackBaseURL,
+			ClientVersion: next.Provider.Build.ClientVersion, ClientIdentifier: next.Provider.Build.ClientIdentifier,
+			TokenAuth: next.Provider.Build.TokenAuth, UserAgent: next.Provider.Build.UserAgent,
 		})
 		webAdapter.UpdateConfig(webProviderConfig(next))
 		consoleAdapter.UpdateConfig(consoleProviderConfig(next))

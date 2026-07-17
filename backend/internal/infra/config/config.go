@@ -131,11 +131,25 @@ type ProviderConfig struct {
 }
 
 type BuildProviderConfig struct {
-	BaseURL          string `yaml:"baseURL"`
+	BaseURL string `yaml:"baseURL"`
+	// FallbackBaseURL is the XAI API root used when a Super Build account is
+	// marked for automatic inference fallback (default https://api.x.ai/v1).
+	FallbackBaseURL  string `yaml:"fallbackBaseURL"`
 	ClientVersion    string `yaml:"clientVersion"`
 	ClientIdentifier string `yaml:"clientIdentifier"`
 	TokenAuth        string `yaml:"tokenAuth"`
 	UserAgent        string `yaml:"userAgent"`
+}
+
+// DefaultBuildFallbackBaseURL 是主 Build API 对可回退推理操作 403 时探测的 XAI API 根地址。
+const DefaultBuildFallbackBaseURL = "https://api.x.ai/v1"
+
+// NormalizeBuildFallbackBaseURL 在旧配置缺字段时填入默认 XAI 备用地址。
+func NormalizeBuildFallbackBaseURL(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return DefaultBuildFallbackBaseURL
+	}
+	return strings.TrimSpace(value)
 }
 
 type WebProviderConfig struct {
@@ -723,7 +737,8 @@ func defaultConfig() Config {
 		},
 		Provider: ProviderConfig{
 			Build: BuildProviderConfig{
-				BaseURL: "https://cli-chat-proxy.grok.com/v1", ClientVersion: RecommendedBuildClientVersion,
+				BaseURL: "https://cli-chat-proxy.grok.com/v1", FallbackBaseURL: DefaultBuildFallbackBaseURL,
+				ClientVersion: RecommendedBuildClientVersion,
 				ClientIdentifier: "grok-shell", TokenAuth: "xai-grok-cli",
 				UserAgent: RecommendedBuildUserAgent,
 			},

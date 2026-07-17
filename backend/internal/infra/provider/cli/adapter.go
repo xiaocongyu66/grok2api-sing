@@ -29,6 +29,7 @@ import (
 
 type Config struct {
 	BaseURL          string
+	FallbackBaseURL  string
 	ClientVersion    string
 	ClientIdentifier string
 	TokenAuth        string
@@ -37,16 +38,18 @@ type Config struct {
 
 // Adapter 实现 Grok Build CLI Responses、模型、Billing 与 OAuth 协议。
 type Adapter struct {
-	cfgMu       sync.RWMutex
-	cfg         Config
-	http        *http.Client
-	oauth       *oauthClient
-	cipher      *security.Cipher
-	base        http.RoundTripper
-	agentID     string
-	modelsMu    sync.Mutex
-	modelsETags map[uint64]string
-	replay      *reasoningreplay.ReasoningReplay
+	cfgMu          sync.RWMutex
+	cfg            Config
+	http           *http.Client
+	oauth          *oauthClient
+	cipher         *security.Cipher
+	base           http.RoundTripper
+	agentID        string
+	modelsMu       sync.Mutex
+	modelsETags    map[uint64]string
+	replay         *reasoningreplay.ReasoningReplay
+	fallbackMarker FallbackMarker
+	uploadIssuer   VideoUploadIssuer
 }
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
@@ -143,8 +146,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if len(body) > 0 {
 		bodyReader = bytes.NewReader(body)
 	}
+	base := a.apiBaseForOperation(ctx, request.Credential, request.Method, request.Path)
 	requestCtx := infraegress.WithAccount(ctx, string(account.ProviderBuild), request.Credential.ID)
-	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.url(request.Path), bodyReader)
+	req, err := http.NewRequestWithContext(requestCtx, request.Method, a.urlWithBase(base, request.Path), bodyReader)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +170,57 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	resp, err := a.http.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	// 未标记账号：仅可回退操作在主地址明确 403 时用等价请求探测 XAI。
+	if a.shouldProbeXAIInferenceFallback(ctx, request.Credential, request.Method, request.Path, resp.StatusCode) {
+		primaryBody, primaryTruncated, readErr := provider.ReadDiagnosticBody(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		primaryResp := cloneBufferedResponse(resp, primaryBody, primaryTruncated)
+		fallbackBase := a.fallbackBaseURL()
+		if fallbackBase != "" && !strings.EqualFold(fallbackBase, base) {
+			var fallbackReader io.Reader
+			if len(body) > 0 {
+				fallbackReader = bytes.NewReader(body)
+			}
+			fallbackReq, fallbackReqErr := http.NewRequestWithContext(requestCtx, request.Method, a.urlWithBase(fallbackBase, request.Path), fallbackReader)
+			if fallbackReqErr == nil {
+				if hdrErr := a.applyHeaders(fallbackReq, request.Credential, accessToken, request.Model, request.PromptCacheKey, true); hdrErr == nil {
+					if len(body) > 0 {
+						fallbackReq.Header.Set("Content-Type", "application/json")
+					}
+					if request.Streaming {
+						fallbackReq.Header.Set("Accept", "text/event-stream")
+						fallbackReq.Header.Set("Accept-Encoding", "identity")
+					} else {
+						fallbackReq.Header.Set("Accept", "application/json")
+					}
+					if request.IdempotencyID != "" {
+						fallbackReq.Header.Set("Idempotency-Key", request.IdempotencyID)
+					}
+					if fallbackResp, fallbackErr := a.http.Do(fallbackReq); fallbackErr == nil {
+						if isHTTPSuccess(fallbackResp.StatusCode) {
+							cred := request.Credential
+							a.activateBuildAPIFallback(ctx, &cred)
+							resp = fallbackResp
+						} else {
+							_ = fallbackResp.Body.Close()
+							resp = primaryResp
+						}
+					} else {
+						resp = primaryResp
+					}
+				} else {
+					resp = primaryResp
+				}
+			} else {
+				resp = primaryResp
+			}
+		} else {
+			resp = primaryResp
+		}
 	}
 	if err := normalizeGzipResponse(resp); err != nil {
 		return nil, err

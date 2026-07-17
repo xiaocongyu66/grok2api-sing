@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -644,6 +645,8 @@ func upsertKnownAccountByIdentity(tx *gorm.DB, value account.Credential, existin
 		row.LastUsedAt = existing.LastUsedAt
 		row.ObservedModel = existing.ObservedModel
 		row.ObservedModelAt = existing.ObservedModelAt
+		// 回退标记不得被普通 upsert/token 刷新清掉。
+		row.BuildAPIFallback = existing.BuildAPIFallback
 		if err := tx.Save(&row).Error; err != nil {
 			return repository.AccountUpsertResult{}, accountModel{}, err
 		}
@@ -851,6 +854,27 @@ func (r *AccountRepository) UpdateCredentialRefreshFailure(ctx context.Context, 
 		"refresh_due_at": retryAt.UTC(), "refresh_failures": max(0, failureCount),
 		"last_refresh_error": truncate(errorCode, 100), "refresh_permanent": permanent, "updated_at": time.Now().UTC(),
 	}).Error
+}
+
+// MarkBuildAPIFallback 仅对 grok_build 账号幂等设置/清除 XAI 推理回退标记。
+func (r *AccountRepository) MarkBuildAPIFallback(ctx context.Context, id uint64, enabled bool) error {
+	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id = ? AND provider = ?", id, account.ProviderBuild).
+		Update("build_api_fallback", enabled)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return repository.ErrNotFound
+		}
+		return fmt.Errorf("仅 grok_build 账号支持 Build API 降级标记")
+	}
+	return nil
 }
 
 func (r *AccountRepository) UpdateObservedModel(ctx context.Context, id uint64, model string, observedAt time.Time) error {
