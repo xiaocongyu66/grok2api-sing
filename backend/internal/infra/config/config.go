@@ -166,6 +166,17 @@ type BatchConfig struct {
 	SyncConcurrency       int
 	RefreshConcurrency    int
 	RandomDelay           Duration
+	// DBBuffer enables optional buffering for bulk DB-heavy operations (e.g. account conversion,
+	// batch updates). Data is pulled from main DB into the buffer (Redis or local SQLite),
+	// processed there to reduce main DB load, then batched back to main DB.
+	// Driver: "none" (default), "redis", "sqlite".
+	DBBuffer DBBufferConfig `yaml:"dbBuffer"`
+}
+
+type DBBufferConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Driver  string `yaml:"driver"` // "redis" or "sqlite"
+	Path    string `yaml:"path"`   // for sqlite buffer file, e.g. "./data/bulk-buffer.db"
 }
 
 type MediaConfig struct {
@@ -590,6 +601,15 @@ func (c Config) Validate() error {
 		c.Batch.RefreshConcurrency < 1 || c.Batch.RefreshConcurrency > 50 {
 		return errors.New("批量任务并发必须在 1 到 50 之间")
 	}
+	if c.Batch.DBBuffer.Enabled {
+		d := strings.ToLower(strings.TrimSpace(c.Batch.DBBuffer.Driver))
+		if d != "redis" && d != "sqlite" {
+			return errors.New("batch.dbBuffer.driver 必须是 redis 或 sqlite")
+		}
+		if d == "sqlite" && strings.TrimSpace(c.Batch.DBBuffer.Path) == "" {
+			return errors.New("batch.dbBuffer.path 开启 sqlite buffer 时不能为空")
+		}
+	}
 	if c.Batch.RandomDelay.Value() < 0 || c.Batch.RandomDelay.Value() > 5*time.Second {
 		return errors.New("批量任务随机延迟必须在 0 到 5 秒之间")
 	}
@@ -679,7 +699,7 @@ func defaultConfig() Config {
 		Database: DatabaseConfig{
 			Driver:   "sqlite",
 			SQLite:   SQLiteDatabaseConfig{Path: "./data/backend.db"},
-			Postgres: PostgresDatabaseConfig{MaxOpenConns: 50, MaxIdleConns: 10},
+			Postgres: PostgresDatabaseConfig{MaxOpenConns: 12, MaxIdleConns: 4},
 		},
 		RuntimeStore: RuntimeStoreConfig{
 			Driver: "memory",
@@ -711,10 +731,11 @@ func defaultConfig() Config {
 			},
 		},
 		Batch: BatchConfig{
-			// Keep bulk workers modest so small Postgres plans (e.g. Aiven 20 slots)
-			// still have headroom for the request path. Refresh is the hottest writer.
-			ImportConcurrency: 10, ConversionConcurrency: 10, SyncConcurrency: 10,
-			RefreshConcurrency: 8, RandomDelay: Duration(500 * time.Millisecond),
+			// Keep bulk workers modest so small Postgres plans (e.g. Aiven) still have headroom.
+			// Conversion can be DB heavy (multiple Gets + links per account).
+			ImportConcurrency: 5, ConversionConcurrency: 3, SyncConcurrency: 5,
+			RefreshConcurrency: 5, RandomDelay: Duration(500 * time.Millisecond),
+			DBBuffer: DBBufferConfig{Enabled: false, Driver: "none", Path: ""},
 		},
 		Media: MediaConfig{
 			Driver: "local", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,

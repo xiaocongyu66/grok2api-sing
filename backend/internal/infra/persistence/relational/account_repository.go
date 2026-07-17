@@ -464,6 +464,24 @@ func (r *AccountRepository) Get(ctx context.Context, id uint64) (account.Credent
 	return values[0], nil
 }
 
+func (r *AccountRepository) GetMany(ctx context.Context, ids []uint64) ([]account.Credential, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []accountModel
+	if err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]account.Credential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, toAccountDomain(row))
+	}
+	if err := r.attachAccountLinks(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (r *AccountRepository) LinkWebToBuild(ctx context.Context, webAccountID, buildAccountID uint64) error {
 	if webAccountID == 0 || buildAccountID == 0 || webAccountID == buildAccountID {
 		return repository.ErrConflict

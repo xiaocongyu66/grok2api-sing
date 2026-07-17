@@ -200,6 +200,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetQuotaRecoveryQueue(quotaQueue)
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
 	accountService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
+	accountService.SetDBBuffer(cfg.Batch.DBBuffer)
 	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
 	if err != nil {
 		if runtimeStore != nil {
@@ -310,6 +311,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		accountService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
 		accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
 		accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
+		accountService.SetDBBuffer(next.Batch.DBBuffer)
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
 		gatewayService.UpdateRetryPolicy(next.Routing.RetryStatusCodes, next.Routing.RetryServerErrors)

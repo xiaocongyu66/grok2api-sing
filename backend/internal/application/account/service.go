@@ -12,6 +12,7 @@ import (
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
@@ -301,7 +302,10 @@ type Service struct {
 	upstreamSync          UpstreamSyncPolicy
 	scheduleReconcileMu   sync.Mutex
 	lastScheduleReconcile time.Time
-	poolNotify            func(accountdomain.Provider)
+	poolNotify func(accountdomain.Provider)
+	// dbBuffer: optional buffering for bulk ops. Pull from main DB to buffer (redis/sqlite),
+	// process on buffer to spare main DB, batch upload at end.
+	dbBuffer config.DBBufferConfig
 }
 
 func (s *Service) SetQuotaRecoveryQueue(queue repository.QuotaRecoveryQueue) {
@@ -320,6 +324,12 @@ func (s *Service) NotifyPoolChanged(p accountdomain.Provider) {
 	if s.poolNotify != nil && p.IsValid() {
 		s.poolNotify(p)
 	}
+}
+
+// SetDBBuffer enables optional buffering (redis or local sqlite) for bulk DB ops as switch.
+// Pull data to buffer, work on buffer, batch flush to main DB to reduce main DB pressure.
+func (s *Service) SetDBBuffer(buf config.DBBufferConfig) {
+	s.dbBuffer = buf
 }
 
 // SetUpstreamSyncPolicy updates proactive billing/quota sync gates (hot-reload safe).
@@ -368,8 +378,9 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 		quotaRefreshes:        make(map[string]*webQuotaRefreshState),
 		quotaRefreshQueue:     make(chan webQuotaRefreshRequest, webQuotaRefreshQueueSize),
 		credentialRefreshWake: make(chan struct{}, 1),
-		conversionPool:        batch.NewPool(8), syncPool: batch.NewPool(10), refreshPool: batch.NewPool(8), logger: slog.Default(),
-		now: func() time.Time { return time.Now().UTC() },
+		conversionPool: batch.NewPool(8), syncPool: batch.NewPool(10), refreshPool: batch.NewPool(8), logger: slog.Default(),
+		now:      func() time.Time { return time.Now().UTC() },
+		dbBuffer: config.DBBufferConfig{Enabled: false, Driver: "none"},
 	}
 }
 
@@ -1654,8 +1665,19 @@ func (s *Service) convertWebAccountsToBuild(ctx context.Context, ids []uint64, s
 	completed := 0
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Prefetch via GetMany to slash per-account DB roundtrips (1 query vs N).
+	// If redisBufferForBulk or localSqliteBuffer is set (optional switch), future
+	// enhancement can load the working set into Redis/local SQLite first, then
+	// batch the LinkWebToBuild + persist back to main DB.
+	preloaded, _ := s.accounts.GetMany(ctx, ids)
+	preMap := make(map[uint64]accountdomain.Credential, len(preloaded))
+	for _, v := range preloaded {
+		preMap[v.ID] = v
+	}
+
 	results, summary, runErr := batch.MapObserved(runCtx, ids, batch.Options{Workers: s.conversionPool.Limit(), Pool: s.conversionPool}, func(workCtx context.Context, id uint64) (outcome, error) {
-		buildID, created, skipped, convertErr := s.convertWebAccountToBuild(workCtx, id, strategy)
+		buildID, created, skipped, convertErr := s.convertWebAccountToBuild(workCtx, id, strategy, preMap)
 		return outcome{accountID: id, buildID: buildID, created: created, skipped: skipped, err: convertErr}, nil
 	}, func(_ int, execution batch.Result[outcome]) {
 		observerMu.Lock()
@@ -1720,10 +1742,14 @@ func (s *Service) convertWebAccountsToBuild(ctx context.Context, ids []uint64, s
 	return result, nil
 }
 
-func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strategy BuildConversionStrategy) (uint64, bool, bool, error) {
-	value, err := s.accounts.Get(ctx, id)
-	if err != nil {
-		return 0, false, false, mapRepositoryError(err)
+func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strategy BuildConversionStrategy, preloaded map[uint64]accountdomain.Credential) (uint64, bool, bool, error) {
+	value, ok := preloaded[id]
+	if !ok {
+		var err error
+		value, err = s.accounts.Get(ctx, id)
+		if err != nil {
+			return 0, false, false, mapRepositoryError(err)
+		}
 	}
 	if value.Provider != accountdomain.ProviderWeb || value.AuthType != accountdomain.AuthTypeSSO {
 		return 0, false, false, ErrUnsupported

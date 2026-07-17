@@ -23,8 +23,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	inferencedomain "github.com/chenyme/grok2api/backend/internal/domain/inference"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
-	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
+	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -103,29 +103,29 @@ type accountModelSyncer interface {
 
 // Service 负责模型路由、账号选择、故障切换与审计收口。
 type Service struct {
-	models         routeResolver
-	audits         auditRecorder
-	accounts       *accountapp.Service
-	clientKeys     *clientkeyapp.Service
-	providers      *provider.Registry
-	selector       *Selector
-	responses      repository.ResponseRepository
-	maxAttempts    atomic.Int64
-	mediaJobs      repository.MediaJobRepository
-	mediaQueue     chan string
-	mediaMu        sync.Mutex
-	mediaQueued    map[string]struct{}
-	mediaWorker    int
-	mediaQueueFull atomic.Uint64
-	logger         *slog.Logger
-	rateLimitMu         sync.Mutex
-	rateLimits          map[string]teamModelRateLimit
-	rateLimitTeams      map[uint64]string
-	modelSyncMu         sync.Mutex
-	modelSyncing        map[uint64]struct{}
-	retryMu             sync.RWMutex
-	retryStatusCodes    []int
-	retryServerErrors   bool
+	models            routeResolver
+	audits            auditRecorder
+	accounts          *accountapp.Service
+	clientKeys        *clientkeyapp.Service
+	providers         *provider.Registry
+	selector          *Selector
+	responses         repository.ResponseRepository
+	maxAttempts       atomic.Int64
+	mediaJobs         repository.MediaJobRepository
+	mediaQueue        chan string
+	mediaMu           sync.Mutex
+	mediaQueued       map[string]struct{}
+	mediaWorker       int
+	mediaQueueFull    atomic.Uint64
+	logger            *slog.Logger
+	rateLimitMu       sync.Mutex
+	rateLimits        map[string]teamModelRateLimit
+	rateLimitTeams    map[uint64]string
+	modelSyncMu       sync.Mutex
+	modelSyncing      map[uint64]struct{}
+	retryMu           sync.RWMutex
+	retryStatusCodes  []int
+	retryServerErrors bool
 }
 
 type teamModelRateLimit struct {
@@ -148,7 +148,7 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 		models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers,
 		selector: selector, responses: responses, logger: slog.Default(),
 		rateLimits: make(map[string]teamModelRateLimit), rateLimitTeams: make(map[uint64]string),
-		modelSyncing: make(map[uint64]struct{}),
+		modelSyncing:     make(map[uint64]struct{}),
 		retryStatusCodes: append([]int(nil), config.DefaultRetryStatusCodes...), retryServerErrors: true,
 	}
 	service.UpdateMaxAttempts(maxAttempts)
@@ -474,7 +474,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		EventID: eventID, RequestID: input.RequestID, ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
 		ModelRouteID: route.ID, ModelPublicID: publicModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
 		Provider: string(route.Provider), Operation: operation, UsageSource: usageSource, Streaming: input.Streaming,
-			ClientType: input.ClientType, ClientUserAgent: input.ClientUserAgent, ClientIP: input.ClientIP,
+		ClientType: input.ClientType, ClientUserAgent: input.ClientUserAgent, ClientIP: input.ClientIP,
 	}
 	if errors.Is(routeErr, clientkeyapp.ErrModelNotAllowed) {
 		record := auditBase
@@ -489,14 +489,18 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return nil, clientkeyapp.ErrModelNotAllowed
 	}
 	if route.Provider == accountdomain.ProviderBuild {
-		input.PromptCacheKey = resolvePromptCacheIdentity(
-			input.ClientKey.ID,
-			route.Provider,
-			route.UpstreamModel,
-			operation,
-			input.PromptCacheKey,
-			input.PromptCacheSeed,
-		)
+		// Respect a pre-resolved stable key from the affinity resolver (e.g. from previous_response_id, conversation seed, or fingerprint).
+		// Only fall back to legacy hash generation when no key was provided.
+		if strings.TrimSpace(input.PromptCacheKey) == "" {
+			input.PromptCacheKey = resolvePromptCacheIdentity(
+				input.ClientKey.ID,
+				route.Provider,
+				route.UpstreamModel,
+				operation,
+				input.PromptCacheKey,
+				input.PromptCacheSeed,
+			)
+		}
 	}
 	adapter, ok := s.providers.Responses(route.Provider)
 	if !ok {

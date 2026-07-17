@@ -25,7 +25,7 @@ import (
 )
 
 type Handler struct {
-	affinity *promptcache.Resolver
+	affinity     *promptcache.Resolver
 	gateway      *gateway.Service
 	models       *modelapp.Service
 	maxBodyBytes int64
@@ -55,7 +55,6 @@ func (h *Handler) SetPromptCacheAffinity(resolver *promptcache.Resolver) {
 		h.affinity = resolver
 	}
 }
-
 
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/models", h.listModels)
@@ -201,9 +200,31 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+
+	promptCacheKey := request.PromptCacheKey
+	if h.affinity != nil {
+		affReq := promptcache.Request{
+			ClientKeyID:      clientKey.ID,
+			Explicit:         request.PromptCacheKey,
+			ConversationSeed: promptcache.ConversationSeedFromChatBody(body),
+		}
+		_, ua, ip := detectClient(c)
+		affReq.UserAgent = ua
+		affReq.ClientIP = ip
+		affReq.Headers = map[string]string{}
+		for _, name := range []string{"x-grok-conv-id", "x-grok-conversation-id", "x-session-id", "conversation-id"} {
+			if v := c.GetHeader(name); v != "" {
+				affReq.Headers[strings.ToLower(name)] = v
+			}
+		}
+		if key, err := h.affinity.Resolve(c.Request.Context(), affReq); err == nil && key != "" {
+			promptCacheKey = key
+		}
+	}
+
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
+		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
 	}))
 	if err != nil {
@@ -241,9 +262,31 @@ func (h *Handler) createMessage(c *gin.Context) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+
+	promptCacheKey := request.PromptCacheKey
+	if h.affinity != nil {
+		affReq := promptcache.Request{
+			ClientKeyID:      clientKey.ID,
+			Explicit:         request.PromptCacheKey,
+			ConversationSeed: promptcache.ConversationSeedFromMessagesBody(body),
+		}
+		_, ua, ip := detectClient(c)
+		affReq.UserAgent = ua
+		affReq.ClientIP = ip
+		affReq.Headers = map[string]string{}
+		for _, name := range []string{"x-grok-conv-id", "x-grok-conversation-id", "x-session-id", "conversation-id"} {
+			if v := c.GetHeader(name); v != "" {
+				affReq.Headers[strings.ToLower(name)] = v
+			}
+		}
+		if key, err := h.affinity.Resolve(c.Request.Context(), affReq); err == nil && key != "" {
+			promptCacheKey = key
+		}
+	}
+
 	result, err := h.gateway.CreateMessage(c.Request.Context(), withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
+		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
 	}))
 	if err != nil {
@@ -667,9 +710,33 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
+
+	promptCacheKey := request.PromptCacheKey
+	if h.affinity != nil {
+		affReq := promptcache.Request{
+			ClientKeyID:        clientKey.ID,
+			Explicit:           request.PromptCacheKey,
+			PreviousResponseID: request.PreviousResponseID,
+			ConversationSeed:   promptcache.ConversationSeedFromResponsesBody(body),
+		}
+		_, ua, ip := detectClient(c)
+		affReq.UserAgent = ua
+		affReq.ClientIP = ip
+		// pass some common session headers
+		affReq.Headers = map[string]string{}
+		for _, name := range []string{"x-grok-conv-id", "x-grok-conversation-id", "x-session-id", "x-client-request-id", "conversation-id"} {
+			if v := c.GetHeader(name); v != "" {
+				affReq.Headers[strings.ToLower(name)] = v
+			}
+		}
+		if key, err := h.affinity.Resolve(c.Request.Context(), affReq); err == nil && key != "" {
+			promptCacheKey = key
+		}
+	}
+
 	input := withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
-		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
+		Body: body, Streaming: request.Stream, PromptCacheKey: promptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
 	})
 	var result *gateway.Result
@@ -682,6 +749,26 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		writeGatewayError(c, err)
 		return
 	}
+
+	// For Responses API (non-stream), link the returned response ID to the affinity key
+	// so future requests using previous_response_id can hit the same stable prompt cache key.
+	if !compact && !request.Stream && result != nil && h.affinity != nil && promptCacheKey != "" && result.Body != nil {
+		data, readErr := io.ReadAll(io.LimitReader(result.Body, 128<<10))
+		result.Body.Close()
+		if readErr == nil && len(data) > 0 {
+			var respID struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(data, &respID) == nil && respID.ID != "" {
+				_ = h.affinity.RememberTurn(c.Request.Context(), clientKey.ID, respID.ID, promptCacheKey)
+			}
+			result.Body = io.NopCloser(bytes.NewReader(data))
+		} else {
+			// fallback: empty body (edge)
+			result.Body = io.NopCloser(bytes.NewReader(nil))
+		}
+	}
+
 	h.writeResult(c, result, request.Stream && !compact)
 }
 
@@ -1160,7 +1247,6 @@ func detectClient(c *gin.Context) (clientType, userAgent, clientIP string) {
 	}
 	return clientid.Detect(userAgent, headers), userAgent, c.ClientIP()
 }
-
 
 func withClientMeta(c *gin.Context, input gateway.Input) gateway.Input {
 	ct, ua, ip := detectClient(c)
