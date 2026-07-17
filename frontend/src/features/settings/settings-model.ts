@@ -135,7 +135,17 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       allowManualBillingRefresh: config.proactiveUpstreamSync?.allowManualBillingRefresh ?? false,
       allowManualQuotaRefresh: config.proactiveUpstreamSync?.allowManualQuotaRefresh ?? false,
     },
-    batch: { ...config.batch, randomDelay: parseDurationMilliseconds(config.batch.randomDelay), dbBuffer: config.batch.dbBuffer || { enabled: false, driver: "none" as const } },
+    batch: {
+      ...config.batch,
+      randomDelay: parseDurationMilliseconds(config.batch.randomDelay),
+      dbBuffer: {
+        enabled: Boolean(config.batch.dbBuffer?.enabled),
+        driver: (config.batch.dbBuffer?.driver === "redis" || config.batch.dbBuffer?.driver === "sqlite" || config.batch.dbBuffer?.driver === "none")
+          ? config.batch.dbBuffer.driver
+          : "none" as const,
+        path: config.batch.dbBuffer?.path ?? "",
+      },
+    },
     media: {
       maxImageSize: parseByteSize(config.media.maxImageBytes), maxTotalSize: parseByteSize(config.media.maxTotalBytes),
       cleanupThresholdPercent: config.media.cleanupThresholdPercent,

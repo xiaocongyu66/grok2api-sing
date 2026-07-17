@@ -246,6 +246,50 @@ export type SettingsSnapshotDTO = {
   restartRequired: string[];
 };
 
+function normalizeDBBuffer(raw: unknown): SettingsConfigDTO["batch"]["dbBuffer"] {
+  const record = isObject(raw) ? (raw as Record<string, unknown>) : {};
+  const driverRaw = typeof record.driver === "string" ? record.driver.trim().toLowerCase() : "";
+  const driver = driverRaw === "redis" || driverRaw === "sqlite" || driverRaw === "none" ? driverRaw : "none";
+  return {
+    enabled: coerceBoolean(record.enabled, false),
+    driver,
+    path: typeof record.path === "string" ? record.path : undefined,
+  };
+}
+
+function normalizeSettingsConfig(raw: unknown): SettingsConfigDTO {
+  if (!isObject(raw)) throw new Error("settings config response shape is invalid");
+  const record = raw as Record<string, unknown>;
+  const batchRaw = isObject(record.batch) ? (record.batch as Record<string, unknown>) : {};
+  const webRaw = isObject(record.providerWeb) ? (record.providerWeb as Record<string, unknown>) : {};
+  const statsigModeRaw = typeof webRaw.statsigMode === "string" ? webRaw.statsigMode : "local";
+  const statsigMode = statsigModeRaw === "manual" || statsigModeRaw === "url" || statsigModeRaw === "local"
+    ? statsigModeRaw
+    : "local";
+  const routingRaw = isObject(record.routing) ? (record.routing as Record<string, unknown>) : {};
+  const retryStatusCodes = Array.isArray(routingRaw.retryStatusCodes)
+    ? routingRaw.retryStatusCodes.filter((item): item is number => typeof item === "number" && Number.isFinite(item))
+    : [402, 403, 429, 503];
+  // Coerce upgrade-sensitive fields so a single missing/empty value cannot blank settings.
+  const withBuffer = {
+    ...record,
+    providerWeb: { ...webRaw, statsigMode },
+    batch: {
+      ...batchRaw,
+      dbBuffer: normalizeDBBuffer(batchRaw.dbBuffer),
+    },
+    routing: {
+      ...routingRaw,
+      retryStatusCodes,
+      retryServerErrors: coerceBoolean(routingRaw.retryServerErrors, true),
+    },
+  };
+  if (!settingsConfigValidator(withBuffer)) {
+    throw new Error("settings config response shape is invalid");
+  }
+  return withBuffer as SettingsConfigDTO;
+}
+
 const settingsConfigValidator = hasShape({
   providerBuild: hasShape({ baseURL: isString, clientVersion: isString, clientIdentifier: isString, tokenAuth: isString, tokenAuthConfigured: isBoolean, userAgent: isString }),
   providerWeb: hasShape({
@@ -258,7 +302,13 @@ const settingsConfigValidator = hasShape({
     billing: isBoolean, webQuota: isBoolean, modelCatalogCatchup: isBoolean,
     allowManualBillingRefresh: isBoolean, allowManualQuotaRefresh: isBoolean,
   }),
-  batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString, dbBuffer: hasShape({ enabled: isBoolean, driver: isOneOf("none", "redis", "sqlite"), path: isOptional(isString) }) }),
+  // dbBuffer is normalized before validation; accept any object/missing here.
+  batch: hasShape({
+    importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString,
+    dbBuffer: (value) => value === undefined || isObject(value) || hasShape({
+      enabled: isBoolean, driver: isOneOf("none", "redis", "sqlite"), path: isOptional(isString),
+    })(value),
+  }),
   media: hasShape({ maxImageBytes: isNumber, maxTotalBytes: isNumber, cleanupThresholdPercent: isNumber, cleanupInterval: isString }),
   routing: hasShape({
     stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber,
@@ -270,13 +320,29 @@ const settingsConfigValidator = hasShape({
   audit: hasShape({ bufferSize: isNumber, batchSize: isNumber, flushInterval: isString }),
   clientKeyDefaults: hasShape({ rpmLimit: isNumber, maxConcurrent: isNumber }),
 });
-const decodeSettingsSnapshot = createObjectDecoder<SettingsSnapshotDTO>("settings", {
-  config: settingsConfigValidator,
-  recommendedProviderBuild: hasShape({ clientVersion: isString, userAgent: isString }),
-  updatedAt: isString,
-  revision: isString,
-  restartRequired: isArrayOf(isString),
-});
+
+const decodeSettingsSnapshot: ApiDecoder<SettingsSnapshotDTO> = (value) => {
+  if (!isObject(value)) throw new Error("settings response shape is invalid");
+  const record = value as Record<string, unknown>;
+  const config = normalizeSettingsConfig(record.config);
+  if (!hasShape({ clientVersion: isString, userAgent: isString })(record.recommendedProviderBuild)) {
+    throw new Error("settings recommendedProviderBuild shape is invalid");
+  }
+  const recommended = record.recommendedProviderBuild as { clientVersion: string; userAgent: string };
+  const updatedAt = coerceString(record.updatedAt);
+  const revision = coerceString(record.revision);
+  if (!updatedAt || !revision) throw new Error("settings revision/updatedAt missing");
+  const restartRequired = Array.isArray(record.restartRequired)
+    ? record.restartRequired.filter((item): item is string => typeof item === "string")
+    : [];
+  return {
+    config,
+    recommendedProviderBuild: recommended,
+    updatedAt,
+    revision,
+    restartRequired,
+  };
+};
 // Keep strict-ish probe validators; list/report use resilient normalizers so one
 // unexpected field (or historical scope typo) cannot blank the entire page.
 function normalizeEgressProbe(raw: unknown): EgressProbeDTO | null {

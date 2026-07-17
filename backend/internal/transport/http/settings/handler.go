@@ -225,6 +225,20 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 	}
 }
 
+func normalizeDBBufferDTO(value settingsapp.DBBufferConfig) dbBufferConfigDTO {
+	driver := strings.ToLower(strings.TrimSpace(value.Driver))
+	switch driver {
+	case "redis", "sqlite", "none":
+	default:
+		driver = "none"
+	}
+	return dbBufferConfigDTO{
+		Enabled: value.Enabled,
+		Driver:  driver,
+		Path:    strings.TrimSpace(value.Path),
+	}
+}
+
 func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 	config := value.Config
 	return settingsResponse{
@@ -251,11 +265,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				ImportConcurrency: config.Batch.ImportConcurrency, ConversionConcurrency: config.Batch.ConversionConcurrency,
 				SyncConcurrency: config.Batch.SyncConcurrency, RefreshConcurrency: config.Batch.RefreshConcurrency,
 				RandomDelay: config.Batch.RandomDelay,
-				DBBuffer: dbBufferConfigDTO{
-					Enabled: config.Batch.DBBuffer.Enabled,
-					Driver:  config.Batch.DBBuffer.Driver,
-					Path:    config.Batch.DBBuffer.Path,
-				},
+				DBBuffer: normalizeDBBufferDTO(config.Batch.DBBuffer),
 			},
 			Media: mediaConfigDTO{
 				MaxImageBytes: config.Media.MaxImageBytes, MaxTotalBytes: config.Media.MaxTotalBytes,

@@ -317,11 +317,11 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 		SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
 		RandomDelay: config.Duration(randomDelay),
-		DBBuffer: config.DBBufferConfig{
+		DBBuffer: normalizeDBBuffer(config.DBBufferConfig{
 			Enabled: value.Batch.DBBuffer.Enabled,
 			Driver:  value.Batch.DBBuffer.Driver,
 			Path:    value.Batch.DBBuffer.Path,
-		},
+		}),
 	}
 	base.Media.MaxImageBytes = value.Media.MaxImageBytes
 	base.Media.MaxTotalBytes = value.Media.MaxTotalBytes
@@ -475,11 +475,11 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		ImportConcurrency: input.Batch.ImportConcurrency, ConversionConcurrency: input.Batch.ConversionConcurrency,
 		SyncConcurrency: input.Batch.SyncConcurrency, RefreshConcurrency: input.Batch.RefreshConcurrency,
 		RandomDelay: config.Duration(randomDelay),
-		DBBuffer: config.DBBufferConfig{
+		DBBuffer: normalizeDBBuffer(config.DBBufferConfig{
 			Enabled: input.Batch.DBBuffer.Enabled,
 			Driver:  input.Batch.DBBuffer.Driver,
 			Path:    input.Batch.DBBuffer.Path,
-		},
+		}),
 	}
 	next.Media.MaxImageBytes = input.Media.MaxImageBytes
 	next.Media.MaxTotalBytes = input.Media.MaxTotalBytes
@@ -566,11 +566,10 @@ func toEditable(cfg config.Config) EditableConfig {
 			ImportConcurrency: cfg.Batch.ImportConcurrency, ConversionConcurrency: cfg.Batch.ConversionConcurrency,
 			SyncConcurrency: cfg.Batch.SyncConcurrency, RefreshConcurrency: cfg.Batch.RefreshConcurrency,
 			RandomDelay: cfg.Batch.RandomDelay.String(),
-			DBBuffer: DBBufferConfig{
-				Enabled: cfg.Batch.DBBuffer.Enabled,
-				Driver:  cfg.Batch.DBBuffer.Driver,
-				Path:    cfg.Batch.DBBuffer.Path,
-			},
+			DBBuffer: func() DBBufferConfig {
+				buf := normalizeDBBuffer(cfg.Batch.DBBuffer)
+				return DBBufferConfig{Enabled: buf.Enabled, Driver: buf.Driver, Path: buf.Path}
+			}(),
 		},
 		Media: MediaConfig{
 			MaxImageBytes: cfg.Media.MaxImageBytes, MaxTotalBytes: cfg.Media.MaxTotalBytes,
@@ -596,5 +595,27 @@ func toEditable(cfg config.Config) EditableConfig {
 			AllowManualBillingRefresh: cfg.Provider.ProactiveUpstreamSync.AllowManualBillingRefresh,
 			AllowManualQuotaRefresh:   cfg.Provider.ProactiveUpstreamSync.AllowManualQuotaRefresh,
 		},
+	}
+}
+
+// normalizeDBBuffer fills defaults so admin JSON never returns an empty driver
+// (frontend decoder requires none|redis|sqlite; legacy rows omit dbBuffer entirely).
+func normalizeDBBuffer(value config.DBBufferConfig) config.DBBufferConfig {
+	driver := strings.ToLower(strings.TrimSpace(value.Driver))
+	switch driver {
+	case "redis", "sqlite", "none":
+		// ok
+	case "memory":
+		driver = "none"
+	default:
+		driver = "none"
+	}
+	if !value.Enabled {
+		// Keep path for UX when re-enabling sqlite later, but force a valid driver label.
+	}
+	return config.DBBufferConfig{
+		Enabled: value.Enabled,
+		Driver:  driver,
+		Path:    strings.TrimSpace(value.Path),
 	}
 }
