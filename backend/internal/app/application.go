@@ -127,6 +127,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	var settingsBus repository.SettingsChangeBus
 	var quotaQueue repository.QuotaRecoveryQueue
 	var runtimeStore io.Closer
+	var redisRuntime *redisruntime.Store
 	runtimeHealth := func(context.Context) error { return nil }
 	switch cfg.RuntimeStore.Driver {
 	case "redis":
@@ -141,6 +142,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			return nil, openErr
 		}
 		runtimeStore = redisStore
+		redisRuntime = redisStore
 		runtimeHealth = redisStore.Ping
 		rateLimiter = redisStore
 		concurrency = redisruntime.NewConcurrencyLimiter(redisStore)
@@ -215,6 +217,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountService.SetTaskPools(conversionPool, syncPool, refreshPool)
 	accountService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
 	accountService.SetDBBuffer(cfg.Batch.DBBuffer)
+	if redisRuntime != nil {
+		accountService.SetDBBufferRedis(redisRuntime.Client(), cfg.RuntimeStore.Redis.KeyPrefix)
+	}
 	windows, err := accountRepo.ListQuotaRecoveryWindows(ctx, 100000)
 	if err != nil {
 		if runtimeStore != nil {
@@ -336,6 +341,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
 		accountSyncService.UpdateConcurrency(nextPools.ImportConcurrency)
 		accountService.SetDBBuffer(next.Batch.DBBuffer)
+		if redisRuntime != nil {
+			accountService.SetDBBufferRedis(redisRuntime.Client(), next.RuntimeStore.Redis.KeyPrefix)
+		}
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
 		gatewayService.UpdateRetryPolicy(next.Routing.RetryStatusCodes, next.Routing.RetryServerErrors)

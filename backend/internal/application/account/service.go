@@ -17,6 +17,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -305,7 +306,9 @@ type Service struct {
 	poolNotify func(accountdomain.Provider)
 	// dbBuffer: optional buffering for bulk ops. Pull from main DB to buffer (redis/sqlite),
 	// process on buffer to spare main DB, batch upload at end.
-	dbBuffer config.DBBufferConfig
+	dbBuffer            config.DBBufferConfig
+	dbBufferRedis       *redis.Client
+	dbBufferRedisPrefix string
 }
 
 func (s *Service) SetQuotaRecoveryQueue(queue repository.QuotaRecoveryQueue) {
@@ -1666,18 +1669,17 @@ func (s *Service) convertWebAccountsToBuild(ctx context.Context, ids []uint64, s
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Prefetch via GetMany to slash per-account DB roundtrips (1 query vs N).
-	// If redisBufferForBulk or localSqliteBuffer is set (optional switch), future
-	// enhancement can load the working set into Redis/local SQLite first, then
-	// batch the LinkWebToBuild + persist back to main DB.
-	preloaded, _ := s.accounts.GetMany(ctx, ids)
-	preMap := make(map[uint64]accountdomain.Credential, len(preloaded))
-	for _, v := range preloaded {
-		preMap[v.ID] = v
+	// Pull working set from main DB into optional buffer (memory/redis/sqlite),
+	// then convert against the buffer and batch-flush LinkWebToBuild at the end.
+	ws, err := s.openBulkWorkingSet(ctx, ids)
+	if err != nil {
+		return BuildConversionResult{}, err
 	}
+	defer ws.close(context.WithoutCancel(ctx))
+	preMap := ws.snapshot()
 
 	results, summary, runErr := batch.MapObserved(runCtx, ids, batch.Options{Workers: s.conversionPool.Limit(), Pool: s.conversionPool}, func(workCtx context.Context, id uint64) (outcome, error) {
-		buildID, created, skipped, convertErr := s.convertWebAccountToBuild(workCtx, id, strategy, preMap)
+		buildID, created, skipped, convertErr := s.convertWebAccountToBuild(workCtx, id, strategy, preMap, ws)
 		return outcome{accountID: id, buildID: buildID, created: created, skipped: skipped, err: convertErr}, nil
 	}, func(_ int, execution batch.Result[outcome]) {
 		observerMu.Lock()
@@ -1733,6 +1735,16 @@ func (s *Service) convertWebAccountsToBuild(ctx context.Context, ids []uint64, s
 			result.BuildAccountIDs = append(result.BuildAccountIDs, item.buildID)
 		}
 	}
+	if ws.deferredLinks {
+		if applied, flushErr := ws.flushLinks(context.WithoutCancel(ctx), s.accounts); flushErr != nil {
+			s.logger.Warn("db_buffer_link_flush_failed", "applied", applied, "error", flushErr)
+			if runErr == nil {
+				runErr = flushErr
+			}
+		} else if applied > 0 {
+			s.logger.Info("db_buffer_links_flushed", "applied", applied, "driver", ws.driver)
+		}
+	}
 	if runErr != nil {
 		return result, runErr
 	}
@@ -1742,8 +1754,11 @@ func (s *Service) convertWebAccountsToBuild(ctx context.Context, ids []uint64, s
 	return result, nil
 }
 
-func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strategy BuildConversionStrategy, preloaded map[uint64]accountdomain.Credential) (uint64, bool, bool, error) {
+func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strategy BuildConversionStrategy, preloaded map[uint64]accountdomain.Credential, ws *bulkWorkingSet) (uint64, bool, bool, error) {
 	value, ok := preloaded[id]
+	if !ok && ws != nil {
+		value, ok = ws.get(id)
+	}
 	if !ok {
 		var err error
 		value, err = s.accounts.Get(ctx, id)
@@ -1765,16 +1780,45 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 		return 0, false, false, ErrConversionBusy
 	}
 	defer release()
-	value, err = s.accounts.Get(ctx, id)
-	if err != nil {
-		return 0, false, false, mapRepositoryError(err)
+	// Prefer buffer under lock when enabled to avoid a second main-DB Get per account.
+	if ws != nil && ws.enabled {
+		if buffered, hit := ws.get(id); hit {
+			value = buffered
+		} else {
+			value, err = s.accounts.Get(ctx, id)
+			if err != nil {
+				return 0, false, false, mapRepositoryError(err)
+			}
+			ws.put(value)
+		}
+	} else {
+		value, err = s.accounts.Get(ctx, id)
+		if err != nil {
+			return 0, false, false, mapRepositoryError(err)
+		}
 	}
 	if value.LinkedAccountID != 0 && strategy == BuildConversionMissing {
 		return value.LinkedAccountID, false, true, nil
 	}
 	linkedBuildSourceKey := ""
 	if value.LinkedAccountID != 0 {
-		linkedBuild, getErr := s.accounts.Get(ctx, value.LinkedAccountID)
+		var linkedBuild accountdomain.Credential
+		var getErr error
+		if preloaded != nil {
+			if cached, hit := preloaded[value.LinkedAccountID]; hit {
+				linkedBuild = cached
+			} else if ws != nil {
+				if cached, hit := ws.get(value.LinkedAccountID); hit {
+					linkedBuild = cached
+				} else {
+					linkedBuild, getErr = s.accounts.Get(ctx, value.LinkedAccountID)
+				}
+			} else {
+				linkedBuild, getErr = s.accounts.Get(ctx, value.LinkedAccountID)
+			}
+		} else {
+			linkedBuild, getErr = s.accounts.Get(ctx, value.LinkedAccountID)
+		}
 		if getErr != nil {
 			return 0, false, false, mapRepositoryError(getErr)
 		}
@@ -1806,7 +1850,10 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 	if value.LinkedAccountID != 0 && buildAccount.ID != value.LinkedAccountID {
 		return 0, false, false, fmt.Errorf("重新转换后的 Grok Build 账号身份不一致")
 	}
-	if err := s.accounts.LinkWebToBuild(ctx, id, buildAccount.ID); err != nil {
+	if ws != nil && ws.deferredLinks {
+		ws.put(buildAccount)
+		ws.queueLink(id, buildAccount.ID)
+	} else if err := s.accounts.LinkWebToBuild(ctx, id, buildAccount.ID); err != nil {
 		return 0, false, false, mapRepositoryError(err)
 	}
 	return buildAccount.ID, created, false, nil

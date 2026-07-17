@@ -184,6 +184,9 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 
 func (s *Store) Close() error { return s.client.Close() }
 
+// Client returns the underlying go-redis client for optional bulk buffers.
+func (s *Store) Client() *redisclient.Client { return s.client }
+
 func (s *Store) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }
 
 func (s *Store) key(namespace, key string) string { return s.prefix + namespace + ":" + key }
