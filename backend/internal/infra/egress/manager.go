@@ -158,6 +158,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	now := time.Now().UTC()
 	configured := false
 	var available []domain.Node
+	var cooling []domain.Node
 	for _, candidateScope := range fallbackScopes(scope) {
 		nodes, err := m.listNodes(ctx, candidateScope, now)
 		if err != nil {
@@ -165,27 +166,57 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		}
 		configured = configured || len(nodes) > 0
 		candidateAvailable := make([]domain.Node, 0, len(nodes))
+		candidateCooling := make([]domain.Node, 0, len(nodes))
 		for _, node := range nodes {
-			if node.Enabled && (node.CooldownUntil == nil || !now.Before(*node.CooldownUntil)) {
+			if !node.Enabled {
+				continue
+			}
+			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
 				candidateAvailable = append(candidateAvailable, node)
+			} else {
+				candidateCooling = append(candidateCooling, node)
 			}
 		}
 		if len(candidateAvailable) > 0 {
 			available = candidateAvailable
 			break
 		}
+		if len(cooling) == 0 && len(candidateCooling) > 0 {
+			// Keep first non-empty cooling set across fallback scopes for degraded pick.
+			cooling = candidateCooling
+		}
 	}
 	if len(available) == 0 {
 		if configured {
-			return nil, false, fmt.Errorf("当前没有可用的 %s 出口节点", scope)
+			// Hard-fail only when every configured node is disabled. Cooling is temporary:
+			// prefer the least-bad proxy over a full outage (HF: all grok_build nodes cooling → 502).
+			// Never fall back to direct while proxies are configured (anti-bot / geo policy).
+			if len(cooling) == 0 {
+				return nil, false, fmt.Errorf("当前没有可用的 %s 出口节点", scope)
+			}
+			available = cooling
+		} else {
+			if !allowDirect {
+				recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
+				return nil, false, nil
+			}
+			available = []domain.Node{{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}}
 		}
-		if !allowDirect {
-			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
-			return nil, false, nil
-		}
-		available = []domain.Node{{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}}
 	}
-	sort.SliceStable(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+	sort.SliceStable(available, func(i, j int) bool {
+		// Prefer sooner-available cooling nodes, then higher health, then stable ID order.
+		ai, aj := available[i], available[j]
+		if ai.CooldownUntil != nil && aj.CooldownUntil != nil && !ai.CooldownUntil.Equal(*aj.CooldownUntil) {
+			return ai.CooldownUntil.Before(*aj.CooldownUntil)
+		}
+		if (ai.CooldownUntil == nil) != (aj.CooldownUntil == nil) {
+			return ai.CooldownUntil == nil
+		}
+		if ai.Health != aj.Health {
+			return ai.Health > aj.Health
+		}
+		return ai.ID < aj.ID
+	})
 	selected := m.selectNode(available, affinity)
 	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
 	if err != nil {
@@ -423,6 +454,11 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		return
 	}
 
+	// Caller cancellation is not a proxy outcome; do not cool healthy nodes.
+	if transportErr != nil && (errors.Is(transportErr, context.Canceled) || errors.Is(transportErr, context.DeadlineExceeded)) {
+		return
+	}
+
 	success := transportErr == nil && status >= 200 && status < 400
 	value, err := m.repository.GetEgressNode(ctx, nodeID)
 	if err != nil {
@@ -467,7 +503,15 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.recordRequest(nodeID, false)
 		value.FailureCount++
 		value.Health = max(0.05, value.Health*0.7)
-		cooldown := min(10*time.Minute, 30*time.Second*time.Duration(1<<min(value.FailureCount-1, 4)))
+		// Build proxies often flap under HF/Aiven load; cap cooldown so the pool
+		// cannot enter a multi-node multi-minute blackout.
+		cooldownCap := 10 * time.Minute
+		base := 30 * time.Second
+		if scope == domain.ScopeBuild {
+			cooldownCap = 90 * time.Second
+			base = 10 * time.Second
+		}
+		cooldown := min(cooldownCap, base*time.Duration(1<<min(value.FailureCount-1, 4)))
 		until := now.Add(cooldown)
 		value.CooldownUntil = &until
 		if transportErr != nil {

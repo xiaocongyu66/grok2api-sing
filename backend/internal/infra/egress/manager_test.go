@@ -85,11 +85,35 @@ func TestConfiguredCoolingAppNodesNeverFallBackToDirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	until := time.Now().Add(time.Minute)
+	encryptedProxy, err := cipher.Encrypt("socks5h://127.0.0.1:1080")
+	if err != nil {
+		t.Fatal(err)
+	}
 	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
-		ID: 1, Name: "proxy", Scope: domain.ScopeWeb, Enabled: true, CooldownUntil: &until,
+		ID: 1, Name: "proxy", Scope: domain.ScopeWeb, Enabled: true, Health: 0.5,
+		CooldownUntil: &until, EncryptedProxyURL: encryptedProxy,
 	}}}, cipher)
-	if _, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account"); err == nil {
-		t.Fatal("cooling configured node unexpectedly fell back to direct")
+	// Cooling is temporary: use the configured proxy in degraded mode, never direct.
+	lease, err := manager.Acquire(context.Background(), domain.ScopeWeb, "account")
+	if err != nil {
+		t.Fatalf("cooling configured node should still be acquirable: %v", err)
+	}
+	defer lease.Release()
+	if lease.NodeID != 1 || lease.NodeName != "proxy" || !strings.Contains(lease.ProxyURL, "127.0.0.1:1080") {
+		t.Fatalf("expected degraded proxy lease, got %#v", lease)
+	}
+}
+
+func TestDisabledConfiguredNodesStillHardFail(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{{
+		ID: 1, Name: "proxy", Scope: domain.ScopeBuild, Enabled: false, Health: 1,
+	}}}, cipher)
+	if _, err := manager.Acquire(context.Background(), domain.ScopeBuild, "account"); err == nil {
+		t.Fatal("disabled configured nodes should hard-fail, not fall back to direct")
 	}
 }
 

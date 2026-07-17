@@ -187,11 +187,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		return nil, err
 	}
 	warnBatchVsPostgres(logger, cfg)
-	bulkPool := batch.NewSharedPool(maxBatchConcurrency(cfg.Batch), concurrency, "bulk:upstream")
-	importPool := batch.NewSharedChildPool(cfg.Batch.ImportConcurrency, concurrency, "bulk:import", bulkPool)
-	conversionPool := batch.NewSharedChildPool(cfg.Batch.ConversionConcurrency, concurrency, "bulk:conversion", bulkPool)
-	syncPool := batch.NewSharedChildPool(cfg.Batch.SyncConcurrency, concurrency, "bulk:sync", bulkPool)
-	refreshPool := batch.NewSharedChildPool(cfg.Batch.RefreshConcurrency, concurrency, "bulk:refresh", bulkPool)
+	// Runtime pool sizes may be lower than admin settings when Postgres maxOpen is tight
+	// (Aiven free tiers trip SQLSTATE 53300 under high credential_auto_refresh waves).
+	// Settings JSON is never rewritten; only worker pools are capped.
+	batchPools := effectiveBatchConfig(cfg)
+	if batchPools != cfg.Batch {
+		logger.Warn("batch_concurrency_runtime_capped",
+			"max_open_conns", cfg.Database.Postgres.MaxOpenConns,
+			"configured_import", cfg.Batch.ImportConcurrency, "effective_import", batchPools.ImportConcurrency,
+			"configured_conversion", cfg.Batch.ConversionConcurrency, "effective_conversion", batchPools.ConversionConcurrency,
+			"configured_sync", cfg.Batch.SyncConcurrency, "effective_sync", batchPools.SyncConcurrency,
+			"configured_refresh", cfg.Batch.RefreshConcurrency, "effective_refresh", batchPools.RefreshConcurrency,
+			"hint", "lower batch concurrency in admin settings or raise database.postgres.maxOpenConns",
+		)
+	}
+	bulkPool := batch.NewSharedPool(maxBatchConcurrency(batchPools), concurrency, "bulk:upstream")
+	importPool := batch.NewSharedChildPool(batchPools.ImportConcurrency, concurrency, "bulk:import", bulkPool)
+	conversionPool := batch.NewSharedChildPool(batchPools.ConversionConcurrency, concurrency, "bulk:conversion", bulkPool)
+	syncPool := batch.NewSharedChildPool(batchPools.SyncConcurrency, concurrency, "bulk:sync", bulkPool)
+	refreshPool := batch.NewSharedChildPool(batchPools.RefreshConcurrency, concurrency, "bulk:refresh", bulkPool)
 	for _, pool := range []*batch.Pool{importPool, conversionPool, syncPool, refreshPool} {
 		pool.UpdateJitter(cfg.Batch.RandomDelay.Value())
 	}
@@ -240,7 +254,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
 	accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
 	accountSyncService.SetBulkPool(importPool)
-	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
+	accountSyncService.UpdateConcurrency(batchPools.ImportConcurrency)
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, cfg.Provider.Console.UserAgent)
 	egressService.SetRuntime(egressManager)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
@@ -288,13 +302,23 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			Enabled: next.Routing.PromptCacheAffinity.Enabled, Fingerprint: next.Routing.PromptCacheAffinity.Fingerprint,
 			Expire: next.Routing.PromptCacheAffinity.Expire, TTL: next.Routing.PromptCacheAffinity.TTL.Value(),
 		})
-		// Honor admin-configured batch concurrency as-is (no silent clamp).
 		warnBatchVsPostgres(logger, next)
-		bulkPool.UpdateLimit(maxBatchConcurrency(next.Batch))
-		importPool.UpdateLimit(next.Batch.ImportConcurrency)
-		conversionPool.UpdateLimit(next.Batch.ConversionConcurrency)
-		syncPool.UpdateLimit(next.Batch.SyncConcurrency)
-		refreshPool.UpdateLimit(next.Batch.RefreshConcurrency)
+		// Cap runtime pools vs Postgres slots; leave admin settings values unchanged.
+		nextPools := effectiveBatchConfig(next)
+		if nextPools != next.Batch {
+			logger.Warn("batch_concurrency_runtime_capped",
+				"max_open_conns", next.Database.Postgres.MaxOpenConns,
+				"configured_import", next.Batch.ImportConcurrency, "effective_import", nextPools.ImportConcurrency,
+				"configured_conversion", next.Batch.ConversionConcurrency, "effective_conversion", nextPools.ConversionConcurrency,
+				"configured_sync", next.Batch.SyncConcurrency, "effective_sync", nextPools.SyncConcurrency,
+				"configured_refresh", next.Batch.RefreshConcurrency, "effective_refresh", nextPools.RefreshConcurrency,
+			)
+		}
+		bulkPool.UpdateLimit(maxBatchConcurrency(nextPools))
+		importPool.UpdateLimit(nextPools.ImportConcurrency)
+		conversionPool.UpdateLimit(nextPools.ConversionConcurrency)
+		syncPool.UpdateLimit(nextPools.SyncConcurrency)
+		refreshPool.UpdateLimit(nextPools.RefreshConcurrency)
 		for _, pool := range []*batch.Pool{importPool, conversionPool, syncPool, refreshPool} {
 			pool.UpdateJitter(next.Batch.RandomDelay.Value())
 		}
@@ -310,7 +334,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		quotaRecoveryService.UpdateConfig(next.Provider.Web.RecoveryBackoffBase.Value(), next.Provider.Web.RecoveryBackoffMax.Value())
 		accountService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
 		accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(next))
-		accountSyncService.UpdateConcurrency(next.Batch.ImportConcurrency)
+		accountSyncService.UpdateConcurrency(nextPools.ImportConcurrency)
 		accountService.SetDBBuffer(next.Batch.DBBuffer)
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
@@ -361,6 +385,37 @@ func warnBatchVsPostgres(logger *slog.Logger, cfg config.Config) {
 		"refresh", cfg.Batch.RefreshConcurrency,
 		"hint", "if you see SQLSTATE 53300, lower batch concurrency or raise maxOpenConns",
 	)
+}
+
+// effectiveBatchConfig returns runtime pool sizes. Admin settings stay as stored;
+// only worker pools are capped so bulk refresh cannot consume every Postgres slot
+// (HF log: SQLSTATE 53300 while credential_auto_refresh ran at pool_limit=25).
+func effectiveBatchConfig(cfg config.Config) config.BatchConfig {
+	out := cfg.Batch
+	if cfg.Database.Driver != "postgres" {
+		return out
+	}
+	maxOpen := cfg.Database.Postgres.MaxOpenConns
+	if maxOpen < 1 {
+		return out
+	}
+	// Leave headroom for request path, healthz, and admin queries.
+	// maxOpen=20 → budget 6; maxOpen=10 → budget 3; always at least 1.
+	budget := max(1, maxOpen/3)
+	clamp := func(v int) int {
+		if v < 1 {
+			return 1
+		}
+		if v > budget {
+			return budget
+		}
+		return v
+	}
+	out.ImportConcurrency = clamp(out.ImportConcurrency)
+	out.ConversionConcurrency = clamp(out.ConversionConcurrency)
+	out.SyncConcurrency = clamp(out.SyncConcurrency)
+	out.RefreshConcurrency = clamp(out.RefreshConcurrency)
+	return out
 }
 
 func webProviderConfig(cfg config.Config) webprovider.Config {
