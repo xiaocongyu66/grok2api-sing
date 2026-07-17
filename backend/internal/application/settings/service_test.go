@@ -52,7 +52,7 @@ func TestUpdatePersistsAppliesAndReportsRestart(t *testing.T) {
 	input.ProviderConsole.BaseURL = "https://console.example.com"
 	input.ProviderConsole.UserAgent = "console-test-agent"
 	input.ProviderConsole.ChatTimeout = "6m"
-	input.Batch = BatchConfig{ImportConcurrency: 26, ConversionConcurrency: 27, SyncConcurrency: 28, RefreshConcurrency: 29, RandomDelay: "750ms"}
+	input.Batch = BatchConfig{ImportConcurrency: 26, ConversionConcurrency: 27, SyncConcurrency: 28, RefreshConcurrency: 29, RandomDelay: "750ms", DBBuffer: {Enabled: false, Driver: "none", Path: ""}}
 
 	snapshot, err := service.Update(context.Background(), service.Get().Revision, input)
 	if err != nil {

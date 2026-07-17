@@ -78,6 +78,11 @@ export const settingsSchema = z.object({
     syncConcurrency: positiveInteger.max(50),
     refreshConcurrency: positiveInteger.max(50),
     randomDelay: z.number().int().min(0).max(5_000),
+    dbBuffer: z.object({
+      enabled: z.boolean(),
+      driver: z.enum(["none", "redis", "sqlite"]),
+      path: z.string().optional(),
+    }),
   }),
   media: z.object({
     maxImageSize: byteSizeSchema.refine((value) => byteSizeBytes(value) >= 1 << 20 && byteSizeBytes(value) <= 32 << 20),
@@ -130,7 +135,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       allowManualBillingRefresh: config.proactiveUpstreamSync?.allowManualBillingRefresh ?? false,
       allowManualQuotaRefresh: config.proactiveUpstreamSync?.allowManualQuotaRefresh ?? false,
     },
-    batch: { ...config.batch, randomDelay: parseDurationMilliseconds(config.batch.randomDelay) },
+    batch: { ...config.batch, randomDelay: parseDurationMilliseconds(config.batch.randomDelay), dbBuffer: config.batch.dbBuffer || { enabled: false, driver: "none" as const } },
     media: {
       maxImageSize: parseByteSize(config.media.maxImageBytes), maxTotalSize: parseByteSize(config.media.maxTotalBytes),
       cleanupThresholdPercent: config.media.cleanupThresholdPercent,
@@ -164,7 +169,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
     },
     providerConsole: { ...config.providerConsole, chatTimeout: formatDuration(config.providerConsole.chatTimeout) },
     proactiveUpstreamSync: config.proactiveUpstreamSync,
-    batch: { ...config.batch, randomDelay: `${config.batch.randomDelay}ms` },
+    batch: { ...config.batch, randomDelay: `${config.batch.randomDelay}ms`, dbBuffer: config.batch.dbBuffer },
     media: {
       maxImageBytes: byteSizeBytes(config.media.maxImageSize), maxTotalBytes: byteSizeBytes(config.media.maxTotalSize),
       cleanupThresholdPercent: config.media.cleanupThresholdPercent,

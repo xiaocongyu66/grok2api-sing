@@ -62,6 +62,14 @@ type BatchConfig struct {
 	SyncConcurrency       int
 	RefreshConcurrency    int
 	RandomDelay           string
+	DBBuffer              DBBufferConfig
+}
+
+// DBBufferConfig for admin input.
+type DBBufferConfig struct {
+	Enabled bool   `json:"enabled"`
+	Driver  string `json:"driver"`
+	Path    string `json:"path"`
 }
 
 type MediaConfig struct {
@@ -309,6 +317,11 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 		SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
 		RandomDelay: config.Duration(randomDelay),
+		DBBuffer: config.DBBufferConfig{
+			Enabled: value.Batch.DBBuffer.Enabled,
+			Driver:  value.Batch.DBBuffer.Driver,
+			Path:    value.Batch.DBBuffer.Path,
+		},
 	}
 	base.Media.MaxImageBytes = value.Media.MaxImageBytes
 	base.Media.MaxTotalBytes = value.Media.MaxTotalBytes
@@ -376,6 +389,11 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			ImportConcurrency: value.Batch.ImportConcurrency, ConversionConcurrency: value.Batch.ConversionConcurrency,
 			SyncConcurrency: value.Batch.SyncConcurrency, RefreshConcurrency: value.Batch.RefreshConcurrency,
 			RandomDelay: &randomDelay,
+			DBBuffer: settingsdomain.DBBufferConfig{
+				Enabled: value.Batch.DBBuffer.Enabled,
+				Driver:  value.Batch.DBBuffer.Driver,
+				Path:    value.Batch.DBBuffer.Path,
+			},
 		},
 		Media: settingsdomain.MediaConfig{
 			MaxImageBytes: value.Media.MaxImageBytes, MaxTotalBytes: value.Media.MaxTotalBytes,
@@ -452,6 +470,12 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	next.Batch = config.BatchConfig{
 		ImportConcurrency: input.Batch.ImportConcurrency, ConversionConcurrency: input.Batch.ConversionConcurrency,
 		SyncConcurrency: input.Batch.SyncConcurrency, RefreshConcurrency: input.Batch.RefreshConcurrency,
+		RandomDelay: config.Duration(randomDelay),
+		DBBuffer: config.DBBufferConfig{
+			Enabled: input.Batch.DBBuffer.Enabled,
+			Driver:  input.Batch.DBBuffer.Driver,
+			Path:    input.Batch.DBBuffer.Path,
+		},
 	}
 	next.Media.MaxImageBytes = input.Media.MaxImageBytes
 	next.Media.MaxTotalBytes = input.Media.MaxTotalBytes
@@ -538,6 +562,11 @@ func toEditable(cfg config.Config) EditableConfig {
 			ImportConcurrency: cfg.Batch.ImportConcurrency, ConversionConcurrency: cfg.Batch.ConversionConcurrency,
 			SyncConcurrency: cfg.Batch.SyncConcurrency, RefreshConcurrency: cfg.Batch.RefreshConcurrency,
 			RandomDelay: cfg.Batch.RandomDelay.String(),
+			DBBuffer: DBBufferConfig{
+				Enabled: cfg.Batch.DBBuffer.Enabled,
+				Driver:  cfg.Batch.DBBuffer.Driver,
+				Path:    cfg.Batch.DBBuffer.Path,
+			},
 		},
 		Media: MediaConfig{
 			MaxImageBytes: cfg.Media.MaxImageBytes, MaxTotalBytes: cfg.Media.MaxTotalBytes,

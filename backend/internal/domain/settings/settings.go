@@ -81,6 +81,14 @@ type BatchConfig struct {
 	SyncConcurrency       int
 	RefreshConcurrency    int
 	RandomDelay           *time.Duration
+	DBBuffer              DBBufferConfig
+}
+
+// DBBufferConfig enables optional Redis/SQLite buffering for bulk DB operations to reduce main DB pressure.
+type DBBufferConfig struct {
+	Enabled bool
+	Driver  string // "redis" or "sqlite"
+	Path    string // for sqlite
 }
 
 // ProviderBuildConfig 定义 Grok Build CLI 上游协议标识。

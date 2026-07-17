@@ -174,6 +174,17 @@ export function SettingsPage() {
               <SettingsField controlId="batch-sync-concurrency" label={t("settings.batch.syncConcurrency")} error={form.formState.errors.batch?.syncConcurrency?.message}><Input id="batch-sync-concurrency" type="number" min={1} max={50} {...form.register("batch.syncConcurrency", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="batch-refresh-concurrency" label={t("settings.batch.refreshConcurrency")} error={form.formState.errors.batch?.refreshConcurrency?.message}><Input id="batch-refresh-concurrency" type="number" min={1} max={50} {...form.register("batch.refreshConcurrency", { valueAsNumber: true })} /></SettingsField>
               <SettingsField controlId="batch-random-delay" label={t("settings.batch.randomDelay")} error={form.formState.errors.batch?.randomDelay?.message}><Input id="batch-random-delay" type="number" min={0} max={5_000} step={10} {...form.register("batch.randomDelay", { valueAsNumber: true })} /></SettingsField>
+              <SettingsField controlId="batch-db-buffer-enabled" label="DB Buffer Enabled (optional Redis/SQLite for bulk to reduce DB calls)">
+                <Controller control={form.control} name="batch.dbBuffer.enabled" render={({ field }) => <Switch id="batch-db-buffer-enabled" checked={field.value} onCheckedChange={field.onChange} />} />
+              </SettingsField>
+              <SettingsField controlId="batch-db-buffer-driver" label="DB Buffer Driver" error={form.formState.errors.batch?.dbBuffer?.driver?.message}>
+                <select id="batch-db-buffer-driver" {...form.register("batch.dbBuffer.driver")}>
+                  <option value="none">none</option>
+                  <option value="redis">redis</option>
+                  <option value="sqlite">sqlite</option>
+                </select>
+              </SettingsField>
+              <SettingsField controlId="batch-db-buffer-path" label="DB Buffer Path (for sqlite)" error={form.formState.errors.batch?.dbBuffer?.path?.message}><Input id="batch-db-buffer-path" {...form.register("batch.dbBuffer.path")} /></SettingsField>
             </div>
           </SettingsSection>
 
