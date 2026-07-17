@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -337,6 +338,15 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 并发租约: %v", ErrRuntimeUnavailable, err)
 	}
 	if !acquired {
+		current := -1
+		if cur, curErr := s.concurrency.Current(ctx, fmt.Sprintf("client:%d", value.ID)); curErr == nil {
+			current = cur
+		}
+		slog.Warn("client_key_concurrency_limit",
+			"client_key_id", value.ID, "name", value.Name,
+			"max_concurrent", value.MaxConcurrent, "in_flight", current,
+			"hint", "raise client key MaxConcurrent so multiple sessions can run in parallel",
+		)
 		return clientkeydomain.Key{}, nil, ErrConcurrencyLimit
 	}
 	if s.touches.shouldTouch(value.ID, now) {

@@ -166,6 +166,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	mediaService := mediaapp.NewService(mediaAssetRepo, mediaJobRepo, objectStore, refreshLock, mediaConfig(cfg))
 
 	egressManager := infraegress.NewManager(egressRepo, cipher)
+	egressManager.SetLogger(logger)
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{BaseURL: cfg.Provider.Build.BaseURL, ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier, TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent}, cipher)
 	cliAdapter.SetEgress(egressManager)
 	webAdapter := webprovider.NewAdapter(webProviderConfig(cfg), egressManager, cipher, responseRepo, mediaService)
@@ -283,6 +284,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	}
 	dashboardService.SetConnectionsTracker(connectionTracker)
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
+	selector.SetLogger(logger)
 	accountService.SetPoolNotify(selector.InvalidateProvider)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
 	gatewayService.SetLogger(logger)

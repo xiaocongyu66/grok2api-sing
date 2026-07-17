@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log/slog"
 	"net/http"
 	"sync"
 
@@ -37,7 +38,12 @@ func (g *ConcurrencyGate) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		g.mu.Lock()
 		if g.active >= g.limit {
+			active, limit := g.active, g.limit
 			g.mu.Unlock()
+			slog.Warn("inference_concurrency_gate_full",
+				"active", active, "limit", limit, "path", c.FullPath(), "method", c.Request.Method,
+				"hint", "raise server.maxConcurrentRequests or reduce parallel clients",
+			)
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
 				"code": "server_overloaded", "message": "服务并发已达到上限，请稍后重试", "param": nil, "type": "server_error",
@@ -45,7 +51,11 @@ func (g *ConcurrencyGate) Middleware() gin.HandlerFunc {
 			return
 		}
 		g.active++
+		active, limit := g.active, g.limit
 		g.mu.Unlock()
+		if active == 1 || active == limit || active%8 == 0 {
+			slog.Info("inference_concurrency_gate", "active", active, "limit", limit, "path", c.FullPath())
+		}
 		defer func() {
 			g.mu.Lock()
 			g.active--

@@ -2,7 +2,10 @@ package egress
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -114,6 +117,84 @@ func TestDisabledConfiguredNodesStillHardFail(t *testing.T) {
 	}}}, cipher)
 	if _, err := manager.Acquire(context.Background(), domain.ScopeBuild, "account"); err == nil {
 		t.Fatal("disabled configured nodes should hard-fail, not fall back to direct")
+	}
+}
+
+func TestSelectNodeRebalancesWhenAffinityOverloaded(t *testing.T) {
+	manager := &Manager{
+		inflight: map[uint64]int{1: 12, 2: 2, 3: 3},
+		logger:   nil,
+	}
+	nodes := []domain.Node{
+		{ID: 1, Name: "p1", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 2, Name: "p2", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 3, Name: "p3", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+	}
+	// Affinity that hashes to node 1 would stick if load were balanced; with 12 vs 2 it must rebalance.
+	for i := 0; i < 64; i++ {
+		affinity := fmt.Sprintf("acct-%d", i)
+		digest := sha256.Sum256([]byte(affinity))
+		idx := int(binary.BigEndian.Uint64(digest[:8]) % uint64(len(nodes)))
+		if nodes[idx].ID == 1 {
+			preferred := manager.selectNode(nodes, affinity)
+			if preferred.ID != 2 {
+				t.Fatalf("affinity=%s preferred overloaded node 1 should rebalance to least inflight (2), got %d", affinity, preferred.ID)
+			}
+			return
+		}
+	}
+	t.Fatal("could not find affinity mapping to node 1")
+}
+
+func TestSelectNodeKeepsSoftAffinityWhenBalanced(t *testing.T) {
+	manager := &Manager{
+		inflight: map[uint64]int{1: 3, 2: 3, 3: 2},
+		logger:   nil,
+	}
+	nodes := []domain.Node{
+		{ID: 1, Name: "p1", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 2, Name: "p2", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 3, Name: "p3", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+	}
+	for i := 0; i < 64; i++ {
+		affinity := fmt.Sprintf("soft-%d", i)
+		digest := sha256.Sum256([]byte(affinity))
+		idx := int(binary.BigEndian.Uint64(digest[:8]) % uint64(len(nodes)))
+		if nodes[idx].ID != 1 {
+			continue
+		}
+		// node1 inflight=3, min=2, skew≈2 → keep soft affinity
+		got := manager.selectNode(nodes, affinity)
+		if got.ID != 1 {
+			t.Fatalf("expected soft affinity keep node 1, got %d", got.ID)
+		}
+		return
+	}
+	t.Fatal("could not find affinity mapping to node 1")
+}
+
+func TestSelectNodeSpreadsWithoutAffinity(t *testing.T) {
+	manager := &Manager{inflight: map[uint64]int{1: 5, 2: 1, 3: 4}, logger: nil}
+	nodes := []domain.Node{
+		{ID: 1, Name: "p1", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 2, Name: "p2", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+		{ID: 3, Name: "p3", Scope: domain.ScopeBuild, Enabled: true, Health: 1},
+	}
+	got := manager.selectNode(nodes, "")
+	if got.ID != 2 {
+		t.Fatalf("least inflight should pick node 2, got %d", got.ID)
+	}
+}
+
+func TestSoftAffinitySkewBounds(t *testing.T) {
+	if softAffinitySkew(1, 0) != 2 {
+		t.Fatalf("base skew = %d", softAffinitySkew(1, 0))
+	}
+	if softAffinitySkew(6, 10) < softAffinitySkew(1, 0) {
+		t.Fatal("larger pool/high load should not shrink skew")
+	}
+	if softAffinitySkew(100, 100) > 6 {
+		t.Fatalf("skew must cap at 6, got %d", softAffinitySkew(100, 100))
 	}
 }
 

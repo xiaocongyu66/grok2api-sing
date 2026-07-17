@@ -556,12 +556,28 @@ attemptLoop:
 		} else {
 			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, input.PromptCacheKey, excluded, !quotaProbeAttempted)
 		}
-		timing.markSelection(time.Since(selectionStarted))
+		selectionCost := time.Since(selectionStarted)
+		timing.markSelection(selectionCost)
 		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("schedule_acquire_failed",
+					"request_id", input.RequestID, "provider", route.Provider, "model", route.UpstreamModel,
+					"attempt", attempt+1, "selection_ms", selectionCost.Milliseconds(), "error", err.Error(),
+					"pinned", ownership != nil,
+				)
+			}
 			if lastFailure == nil {
 				lastErr = err
 			}
 			break
+		}
+		if s.logger != nil {
+			s.logger.Info("schedule_acquire_ok",
+				"request_id", input.RequestID, "provider", route.Provider, "model", route.UpstreamModel,
+				"account_id", lease.Credential.ID, "account_name", lease.Credential.Name,
+				"max_concurrent", lease.Credential.MaxConcurrent, "selection_ms", selectionCost.Milliseconds(),
+				"attempt", attempt+1, "pinned", ownership != nil, "quota_probe", lease.QuotaProbe,
+			)
 		}
 		excluded[lease.Credential.ID] = true
 		if limited, ok := s.activeTeamModelRateLimit(lease.Credential, route.UpstreamModel, time.Now().UTC()); ok {

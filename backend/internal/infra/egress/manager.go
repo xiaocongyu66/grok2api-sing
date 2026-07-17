@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -20,6 +21,28 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
 )
+
+// softAffinityBaseSkew is the minimum inflight gap allowed before rebalancing away
+// from a sticky proxy (keeps multi-turn sessions on the same node when load is even).
+const softAffinityBaseSkew = 2
+
+// softAffinitySkew returns how far above min inflight a sticky node may sit before
+// traffic is rebalanced. Scales slowly with pool size so 64 concurrent / 6 proxies
+// stays near ~10–12 per node without thrashing sticky sessions.
+func softAffinitySkew(poolSize, minInflight int) int {
+	if poolSize < 1 {
+		poolSize = 1
+	}
+	// +1 per 4 nodes beyond the first, and +1 when baseline load is already high.
+	skew := softAffinityBaseSkew + (poolSize-1)/4
+	if minInflight >= 8 {
+		skew++
+	}
+	if skew > 6 {
+		return 6
+	}
+	return skew
+}
 
 const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 const nodeSnapshotTTL = time.Second
@@ -79,6 +102,7 @@ type nodeRuntimeStats struct {
 type Manager struct {
 	repository repository.EgressRepository
 	cipher     *security.Cipher
+	logger     *slog.Logger
 	mu         sync.Mutex
 	clients    map[clientCacheKey]cachedClient
 	inflight   map[uint64]int
@@ -108,12 +132,24 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 	return &Manager{
 		repository: repository,
 		cipher:     cipher,
+		logger:     slog.Default(),
 		clients:    make(map[clientCacheKey]cachedClient),
 		inflight:   make(map[uint64]int),
 		stats:      make(map[uint64]*nodeRuntimeStats),
 		nodes:      make(map[domain.Scope]cachedNodeSnapshot),
 		probeURL:   defaultProbeURL,
 	}
+}
+
+// SetLogger attaches a structured logger for egress selection diagnostics.
+func (m *Manager) SetLogger(logger *slog.Logger) {
+	if m == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	m.logger = logger
 }
 
 func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
@@ -357,29 +393,68 @@ func fallbackScopes(scope domain.Scope) []domain.Scope {
 	return []domain.Scope{scope}
 }
 
+// selectNode load-balances by least inflight. Soft affinity keeps a sticky node when
+// its load is within softAffinitySkew of the least-loaded peer so multi-session traffic
+// spreads across proxies (64 concurrent / 6 nodes ≈ 10–12 each) without thrashing.
 func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
-	if affinity != "" {
-		digest := sha256.Sum256([]byte(affinity))
-		selected := nodes[int(binary.BigEndian.Uint64(digest[:8])%uint64(len(nodes)))]
-		if selected.Health >= 0.8 || len(nodes) == 1 {
-			return selected
-		}
-		for _, node := range nodes {
-			if node.Health > selected.Health {
-				selected = node
-			}
-		}
-		return selected
+	if len(nodes) == 1 {
+		return nodes[0]
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	best := nodes[0]
+
+	minInflight := m.inflight[nodes[0].ID]
 	for _, node := range nodes[1:] {
-		if m.inflight[node.ID] < m.inflight[best.ID] || (m.inflight[node.ID] == m.inflight[best.ID] && node.Health > best.Health) {
-			best = node
+		if cur := m.inflight[node.ID]; cur < minInflight {
+			minInflight = cur
 		}
 	}
-	return best
+
+	skew := softAffinitySkew(len(nodes), minInflight)
+	reason := "least_inflight"
+	var selected domain.Node
+	if affinity != "" {
+		digest := sha256.Sum256([]byte(affinity))
+		preferred := nodes[int(binary.BigEndian.Uint64(digest[:8])%uint64(len(nodes)))]
+		prefLoad := m.inflight[preferred.ID]
+		if preferred.Health >= 0.5 && prefLoad <= minInflight+skew {
+			selected = preferred
+			reason = "soft_affinity"
+		}
+	}
+	if reason != "soft_affinity" {
+		// No usable sticky node (missing affinity, overloaded, or unhealthy): least inflight.
+		selected = nodes[0]
+		for _, node := range nodes[1:] {
+			ni, bi := m.inflight[node.ID], m.inflight[selected.ID]
+			if ni < bi || (ni == bi && node.Health > selected.Health) || (ni == bi && node.Health == selected.Health && node.ID < selected.ID) {
+				selected = node
+			}
+		}
+		if affinity != "" {
+			reason = "rebalance_least_inflight"
+		}
+	}
+
+	if m.logger != nil {
+		loads := make([]string, 0, len(nodes))
+		for _, node := range nodes {
+			loads = append(loads, fmt.Sprintf("%s=%d", node.Name, m.inflight[node.ID]))
+		}
+		m.logger.Info("egress_node_selected",
+			"scope", selected.Scope,
+			"node_id", selected.ID,
+			"node_name", selected.Name,
+			"reason", reason,
+			"inflight", m.inflight[selected.ID],
+			"min_inflight", minInflight,
+			"skew", skew,
+			"pool", len(nodes),
+			"loads", strings.Join(loads, ","),
+			"affinity_set", affinity != "",
+		)
+	}
+	return selected
 }
 
 func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool) (cachedClient, error) {

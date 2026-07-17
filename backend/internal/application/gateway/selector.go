@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,7 @@ type Selector struct {
 	accounts       repository.AccountRepository
 	concurrency    repository.ConcurrencyLimiter
 	sticky         repository.StickySessionRepository
+	logger         *slog.Logger
 	stickyTTL      time.Duration
 	cooldownBase   time.Duration
 	cooldownMax    time.Duration
@@ -114,7 +116,25 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot)}
+	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, logger: slog.Default(), tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot)}
+}
+
+// SetLogger attaches schedule diagnostics logger (account pick, capacity wait, sticky).
+func (s *Selector) SetLogger(logger *slog.Logger) {
+	if s == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	s.logger = logger
+}
+
+func (s *Selector) log(level slog.Level, msg string, args ...any) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	s.logger.Log(context.Background(), level, msg, args...)
 }
 
 func (s *Selector) UpdateConfig(stickyTTL, cooldownBase, cooldownMax time.Duration, capacityWait ...time.Duration) {
@@ -252,20 +272,39 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 				if lease != nil {
 					lease.Billing = candidate.Billing
 					lease.QuotaMode = effectiveQuotaMode(candidate, quotaMode)
+					s.log(slog.LevelInfo, "schedule_account_selected",
+						"provider", provider, "model", upstreamModel, "account_id", candidate.Credential.ID,
+						"reason", "sticky", "max_concurrent", accountConcurrencyLimit(candidate.Credential),
+						"normal_pool", len(normalCandidates), "probe_pool", len(probeCandidates),
+					)
 					return lease, nil
 				}
+				s.log(slog.LevelInfo, "schedule_sticky_saturated",
+					"provider", provider, "model", upstreamModel, "account_id", stickyID,
+					"max_concurrent", accountConcurrencyLimit(candidate.Credential),
+					"normal_pool", len(normalCandidates),
+					"hint", "sticky account at concurrency cap; trying other accounts",
+				)
+			} else {
+				s.log(slog.LevelInfo, "schedule_sticky_unavailable",
+					"provider", provider, "model", upstreamModel, "account_id", stickyID,
+					"hint", "sticky account not in normal pool (cooldown/quota/disabled)",
+				)
 			}
 		}
 	}
 	_, _, _, capacityWait := s.routingConfig()
 	waitDeadline := time.Now().Add(capacityWait)
+	waitRounds := 0
 	for {
 		currentTime := time.Now().UTC()
 		plan, err := s.planCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel))
 		if err != nil {
 			return nil, err
 		}
+		tried := 0
 		for candidate, ok := plan.Next(); ok; candidate, ok = plan.Next() {
+			tried++
 			lease, err := s.claimAccountSlot(ctx, candidate.Credential)
 			if err != nil {
 				return nil, err
@@ -301,19 +340,48 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			}
 			lease.Billing = candidate.Billing
 			lease.QuotaMode = effectiveQuotaMode(candidate, quotaMode)
+			s.log(slog.LevelInfo, "schedule_account_selected",
+				"provider", provider, "model", upstreamModel, "account_id", candidate.Credential.ID,
+				"reason", "balanced", "max_concurrent", accountConcurrencyLimit(candidate.Credential),
+				"normal_pool", len(normalCandidates), "tried", tried, "wait_rounds", waitRounds,
+				"cooling", coolingCandidates, "quota_blocked", quotaCandidates, "model_cooling", modelCoolingCandidates,
+			)
 			return lease, nil
 		}
 		if capacityWait <= 0 {
+			s.log(slog.LevelWarn, "schedule_saturated",
+				"provider", provider, "model", upstreamModel, "normal_pool", len(normalCandidates),
+				"cooling", coolingCandidates, "quota_blocked", quotaCandidates, "wait_disabled", true,
+			)
 			return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
 		}
+		if waitRounds == 0 {
+			s.log(slog.LevelInfo, "schedule_capacity_wait_start",
+				"provider", provider, "model", upstreamModel, "normal_pool", len(normalCandidates),
+				"capacity_wait_ms", capacityWait.Milliseconds(),
+				"hint", "all candidate accounts at MaxConcurrent; waiting for a free slot (blocks other sessions if pool is tiny)",
+			)
+		}
+		waitRounds++
 		retry, err := s.awaitLeaseRetry(ctx, waitDeadline)
 		if err != nil {
 			return nil, err
 		}
 		if !retry {
+			s.log(slog.LevelWarn, "schedule_saturated",
+				"provider", provider, "model", upstreamModel, "normal_pool", len(normalCandidates),
+				"wait_rounds", waitRounds, "capacity_wait_ms", capacityWait.Milliseconds(),
+			)
 			return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
 		}
 	}
+}
+
+func accountConcurrencyLimit(value account.Credential) int {
+	if value.MaxConcurrent > 0 {
+		return value.MaxConcurrent
+	}
+	return account.DefaultMaxConcurrent
 }
 
 // promptCacheStickyKey 将调用方缓存键压缩为固定长度，仅用于本地账号粘滞索引。
@@ -578,10 +646,7 @@ func (s *Selector) InvalidateProvider(provider account.Provider) {
 }
 
 func (s *Selector) claimAccountSlot(ctx context.Context, value account.Credential) (*accountLease, error) {
-	limit := value.MaxConcurrent
-	if limit <= 0 {
-		limit = account.DefaultMaxConcurrent
-	}
+	limit := accountConcurrencyLimit(value)
 	release, acquired, err := s.concurrency.Acquire(ctx, accountConcurrencyKey(value.ID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("获取账号并发租约: %w", err)
