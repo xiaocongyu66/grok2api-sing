@@ -258,7 +258,7 @@ const settingsConfigValidator = hasShape({
     billing: isBoolean, webQuota: isBoolean, modelCatalogCatchup: isBoolean,
     allowManualBillingRefresh: isBoolean, allowManualQuotaRefresh: isBoolean,
   }),
-  batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString, dbBuffer: hasShape({ enabled: isBoolean, driver: isOneOf(["none", "redis", "sqlite"]), path: isOptional(isString) }) }),
+  batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString, dbBuffer: hasShape({ enabled: isBoolean, driver: isOneOf("none", "redis", "sqlite"), path: isOptional(isString) }) }),
   media: hasShape({ maxImageBytes: isNumber, maxTotalBytes: isNumber, cleanupThresholdPercent: isNumber, cleanupInterval: isString }),
   routing: hasShape({
     stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber,
