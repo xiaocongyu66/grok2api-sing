@@ -55,8 +55,18 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 	if foreign != 0 || !strings.Contains(string(expanded), "This session is being continued") || strings.Contains(string(expanded), `"type":"compaction"`) || !strings.Contains(string(expanded), `"role":"user"`) {
 		t.Fatalf("expanded = %s, foreign = %d", expanded, foreign)
 	}
-	if _, _, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]} `), codec, "other-session"); err == nil {
-		t.Fatal("session mismatch must reject a gateway-owned blob")
+	// Session mismatch: degrade to boundary (do not hard-fail; multi-account pools rotate keys).
+	mismatched, foreignMiss, err := expandGatewayCompactionHistory([]byte(`{"input":[{"type":"compaction","encrypted_content":`+mustJSONString(blob)+`}]}`), codec, "other-session")
+	if err != nil || foreignMiss != 1 || strings.Contains(string(mismatched), `"type":"compaction"`) || !strings.Contains(string(mismatched), "cannot be decoded") {
+		t.Fatalf("session mismatch expand = %s foreign=%d err=%v", mismatched, foreignMiss, err)
+	}
+}
+
+func TestScrubUpstreamCompactionBlobsRemovesNativeState(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5","input":[{"type":"compaction","encrypted_content":"native-grok-blob"},{"type":"message","role":"user","content":"hi"}]}`)
+	out, n := scrubUpstreamCompactionBlobs(body)
+	if n != 1 || strings.Contains(string(out), `"type":"compaction"`) || !strings.Contains(string(out), "cannot be decoded") {
+		t.Fatalf("scrub = %s n=%d", out, n)
 	}
 }
 

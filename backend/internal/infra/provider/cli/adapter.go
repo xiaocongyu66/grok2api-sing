@@ -117,23 +117,28 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	var toolCompatibility *responsesToolCompatibility
 	var conversationOptions conversation.ResponseOptions
 	compactionRequested := false
+	foreignCompactions := 0
 	if request.NormalizeBody {
 		if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 			body, conversationOptions, err = conversation.ConvertRequestWithOptions(body, request.Model, request.Operation)
-		} else {
-			// Expand gateway-owned compaction blobs; never forward foreign provider blobs
-			// to Grok Build (causes "Could not decode the compaction blob").
-			var foreignCompactions int
-			body, foreignCompactions, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
-			if err != nil {
-				return invalidResponsesResponse(err), nil
+			if err == nil {
+				// Chat/Messages convert into Responses-shaped bodies that may still carry
+				// type=compaction items from multi-backend clients.
+				var n int
+				body, n, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
+				foreignCompactions += n
 			}
-			body, toolCompatibility, err = normalizeResponsesRequest(body, request.Model)
+		} else {
+			// Expand gateway-owned compaction blobs; never forward foreign/native Grok
+			// account-scoped blobs (upstream: "Could not decode the compaction blob").
+			var n int
+			body, n, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
+			foreignCompactions += n
+			if err == nil {
+				body, toolCompatibility, err = normalizeResponsesRequest(body, request.Model)
+			}
 			if toolCompatibility != nil {
 				compactionRequested = toolCompatibility.compactionRequested
-				if foreignCompactions > 0 {
-					toolCompatibility.addWarning("foreign_compaction_omitted")
-				}
 			}
 		}
 		if err != nil {
@@ -164,6 +169,16 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		if a.replay != nil && request.PromptCacheKey != "" && !isCompactPath(request.Path) && !compactionRequested {
 			body = a.replay.Apply(ctx, request.Model, request.PromptCacheKey, body)
 		}
+		// Last-mile: after inject/replay, scrub any remaining type=compaction so Grok
+		// never sees foreign/account-scoped compact state.
+		if !compactionRequested {
+			var scrubbed int
+			body, scrubbed = scrubUpstreamCompactionBlobs(body)
+			foreignCompactions += scrubbed
+		}
+	}
+	if foreignCompactions > 0 && toolCompatibility != nil {
+		toolCompatibility.addWarning("foreign_compaction_omitted")
 	}
 	if compactionRequested {
 		warnings := ""

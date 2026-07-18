@@ -83,8 +83,12 @@ func (c *gatewayCompactionCodec) decode(session, blob string) (string, bool, err
 }
 
 // expandGatewayCompactionHistory restores gateway-owned remote-v2 state to a
-// portable developer message. Foreign OpenAI/Claude/Gemini blobs are never
-// forwarded to Grok Build: its decoder cannot decrypt those provider states.
+// portable developer message. Foreign OpenAI/Claude/Gemini/native-Grok blobs
+// are never forwarded to Grok Build: its decoder rejects account-scoped or
+// modified compact state with "Could not decode the compaction blob".
+//
+// Session mismatch or corrupt g2a blobs degrade to a boundary message instead
+// of hard-failing the request (prompt_cache_key rotation / multi-account pools).
 func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, session string) ([]byte, int, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -98,24 +102,22 @@ func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, 
 	changed := false
 	for index, raw := range items {
 		item, ok := raw.(map[string]any)
-		if !ok || stringField(item, "type") != "compaction" {
+		if !ok {
 			continue
 		}
-		blob, _ := item["encrypted_content"].(string)
-		summary, owned, err := codec.decode(session, blob)
-		if err != nil {
-			return nil, 0, &responsesRequestError{
-				Message: "compaction 状态无效或不属于当前会话",
-				Param:   fmt.Sprintf("input[%d].encrypted_content", index),
-				Code:    "invalid_compaction_state",
-			}
+		if !isCompactionInputItem(item) {
+			continue
 		}
-		if owned {
-			items[index] = gatewayCompactionSummaryMessage(summary)
-		} else {
+		blob := compactionBlobString(item)
+		summary, owned, err := decodeGatewayCompactionBlob(codec, session, blob)
+		if err != nil || !owned {
+			// Corrupt/mismatched g2a or any non-gateway blob: never forward upstream.
 			foreign++
-			items[index] = compatibilityBoundaryMessage("A compacted context created by another provider cannot be decoded by Grok Build. Continue from the retained conversation messages.")
+			items[index] = foreignCompactionBoundaryMessage()
+			changed = true
+			continue
 		}
+		items[index] = gatewayCompactionSummaryMessage(summary)
 		changed = true
 	}
 	if !changed {
@@ -124,6 +126,80 @@ func expandGatewayCompactionHistory(body []byte, codec *gatewayCompactionCodec, 
 	payload["input"] = items
 	encoded, err := json.Marshal(payload)
 	return encoded, foreign, err
+}
+
+func decodeGatewayCompactionBlob(codec *gatewayCompactionCodec, session, blob string) (summary string, owned bool, err error) {
+	if codec == nil {
+		if strings.HasPrefix(blob, gatewayCompactionPrefix) {
+			return "", true, fmt.Errorf("compaction codec unavailable")
+		}
+		return "", false, nil
+	}
+	return codec.decode(session, blob)
+}
+
+func isCompactionInputItem(item map[string]any) bool {
+	typ := strings.ToLower(strings.TrimSpace(stringField(item, "type")))
+	return typ == "compaction"
+}
+
+func compactionBlobString(item map[string]any) string {
+	switch v := item["encrypted_content"].(type) {
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	case float64:
+		// JSON numbers should not appear; stringify defensively.
+		return fmt.Sprintf("%v", v)
+	default:
+		if v == nil {
+			return ""
+		}
+		// Nested objects/arrays cannot be valid Grok compact state for us.
+		if data, err := json.Marshal(v); err == nil {
+			return string(data)
+		}
+		return ""
+	}
+}
+
+func foreignCompactionBoundaryMessage() map[string]any {
+	return compatibilityBoundaryMessage("A compacted context from another account or provider cannot be decoded by Grok Build. Continue from the retained conversation messages (start a new session if this blocks progress).")
+}
+
+// scrubUpstreamCompactionBlobs is a last-mile guard: after all normalizations,
+// ensure no type=compaction item remains in the outbound Responses body.
+func scrubUpstreamCompactionBlobs(body []byte) ([]byte, int) {
+	if len(body) == 0 {
+		return body, 0
+	}
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) != nil {
+		return body, 0
+	}
+	items, ok := payload["input"].([]any)
+	if !ok {
+		return body, 0
+	}
+	removed := 0
+	for index, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok || !isCompactionInputItem(item) {
+			continue
+		}
+		items[index] = foreignCompactionBoundaryMessage()
+		removed++
+	}
+	if removed == 0 {
+		return body, 0
+	}
+	payload["input"] = items
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body, 0
+	}
+	return encoded, removed
 }
 
 // prepareGatewayCompactionSample mirrors Grok Build 0.2.103 full-replace
