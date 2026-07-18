@@ -63,10 +63,27 @@ func TestGatewayCompactionLifecycle(t *testing.T) {
 }
 
 func TestScrubUpstreamCompactionBlobsRemovesNativeState(t *testing.T) {
-	body := []byte(`{"model":"grok-4.5","input":[{"type":"compaction","encrypted_content":"native-grok-blob"},{"type":"message","role":"user","content":"hi"}]}`)
+	body := []byte(`{"model":"grok-4.5","input":[{"type":"compaction","encrypted_content":"native-grok-blob-with-enough-length-to-look-opaque-xxxxxxxx"},{"type":"message","role":"user","content":"hi"}]}`)
 	out, n := scrubUpstreamCompactionBlobs(body)
 	if n != 1 || strings.Contains(string(out), `"type":"compaction"`) || !strings.Contains(string(out), "cannot be decoded") {
 		t.Fatalf("scrub = %s n=%d", out, n)
+	}
+}
+
+func TestScrubUpstreamCompactionBlobsRemovesNestedContentParts(t *testing.T) {
+	// Some clients nest compact state under message content; top-level-only scrub misses this.
+	body := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"compaction","encrypted_content":"native-nested-blob-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]}]}`)
+	out, n := scrubUpstreamCompactionBlobs(body)
+	if n < 1 || strings.Contains(string(out), `"type":"compaction"`) || strings.Contains(string(out), "native-nested-blob") {
+		t.Fatalf("nested scrub = %s n=%d", out, n)
+	}
+}
+
+func TestScrubDoesNotStripReasoningEncryptedContent(t *testing.T) {
+	body := []byte(`{"input":[{"type":"reasoning","encrypted_content":"sig-that-is-long-enough-to-look-opaque-but-is-reasoning-not-compact"}]}`)
+	out, n := scrubUpstreamCompactionBlobs(body)
+	if n != 0 || !strings.Contains(string(out), `"type":"reasoning"`) || !strings.Contains(string(out), "sig-that-is-long") {
+		t.Fatalf("reasoning must survive scrub = %s n=%d", out, n)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -148,6 +149,14 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			return invalidResponsesResponse(err), nil
 		}
 	}
+	// Native POST /responses/compact returns account-scoped Grok blobs that break
+	// after pool failover. Always emulate via gateway-owned sampling instead.
+	if !compactionRequested && isCompactPath(request.Path) && request.Method == http.MethodPost {
+		compactionRequested = true
+		if toolCompatibility != nil {
+			toolCompatibility.addWarning("remote_compaction_v2_emulated")
+		}
+	}
 	if compactionRequested {
 		body, err = prepareGatewayCompactionSample(body)
 		if err != nil {
@@ -169,12 +178,19 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		if a.replay != nil && request.PromptCacheKey != "" && !isCompactPath(request.Path) && !compactionRequested {
 			body = a.replay.Apply(ctx, request.Model, request.PromptCacheKey, body)
 		}
-		// Last-mile: after inject/replay, scrub any remaining type=compaction so Grok
-		// never sees foreign/account-scoped compact state.
+		// Last-mile: deep-scrub every compaction object so Grok never sees
+		// foreign/account-scoped compact state (nested content included).
 		if !compactionRequested {
 			var scrubbed int
 			body, scrubbed = scrubUpstreamCompactionBlobs(body)
-			foreignCompactions += scrubbed
+			if scrubbed > 0 {
+				foreignCompactions += scrubbed
+				slog.Warn("compaction_blob_scrubbed",
+					"removed", scrubbed,
+					"path", request.Path,
+					"prompt_cache_key_set", strings.TrimSpace(request.PromptCacheKey) != "",
+				)
+			}
 		}
 	}
 	if foreignCompactions > 0 && toolCompatibility != nil {
@@ -188,6 +204,12 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 		return a.forwardGatewayCompaction(ctx, request, accessToken, body, warnings)
 	}
 	base := a.apiBaseForOperation(ctx, request.Credential, request.Method, request.Path)
+	// Absolute last defense inside the HTTP sender as well.
+	if scrubbedBody, n := scrubUpstreamCompactionBlobs(body); n > 0 {
+		slog.Warn("compaction_blob_scrubbed", "removed", n, "path", request.Path, "stage", "do_request")
+		body = scrubbedBody
+		foreignCompactions += n
+	}
 	resp, reqURL, err := a.doResponseRequest(ctx, request, accessToken, body, base)
 	if err != nil {
 		return nil, err
