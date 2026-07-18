@@ -87,6 +87,32 @@ func TestScrubDoesNotStripReasoningEncryptedContent(t *testing.T) {
 	}
 }
 
+func TestResolveGatewayPreviousResponseExpandsSummary(t *testing.T) {
+	recall := newGatewayCompactRecall()
+	summary := "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n" + strings.Repeat("summary-body-", 40)
+	recall.remember("resp_gateway_compact_1", "session", summary)
+	body := []byte(`{"model":"grok-4.5","previous_response_id":"resp_gateway_compact_1","input":[{"type":"message","role":"user","content":"continue"}]}`)
+	out, ok := resolveGatewayPreviousResponse(body, recall)
+	if !ok {
+		t.Fatal("expected previous_response rewrite")
+	}
+	if strings.Contains(string(out), "previous_response_id") {
+		t.Fatalf("previous_response_id leaked: %s", out)
+	}
+	if !strings.Contains(string(out), "This session is being continued") || !strings.Contains(string(out), "continue") {
+		t.Fatalf("expanded body = %s", out)
+	}
+}
+
+func TestIsCompactionBlobDecodeError(t *testing.T) {
+	if !isCompactionBlobDecodeError([]byte(`{"error":{"code":"invalid-argument","message":"Could not decode the compaction blob. Ensure it is unmodified from the compact response."}}`)) {
+		t.Fatal("expected detect")
+	}
+	if isCompactionBlobDecodeError([]byte(`{"error":{"message":"model not found"}}`)) {
+		t.Fatal("false positive")
+	}
+}
+
 func TestCleanGatewayCompactionSummaryMatchesGrokBuildScratchpadRules(t *testing.T) {
 	raw := "<summary>**Analysis**\nprivate draft\n</analysis>\n<summary>1. Primary Request: keep this. " + strings.Repeat("x", 520) + "</summary></summary>"
 	cleaned := cleanGatewayCompactionSummary(raw)

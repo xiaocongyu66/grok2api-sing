@@ -158,6 +158,13 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 		if convertErr != nil {
 			return gatewayCompactionFailureProviderResponse(resp.Header, reqURL, modelCatalogChanged, warnings, "服务端 compaction 响应编码失败"), nil
 		}
+		// Remember synthetic response id → summary so previous_response_id continuations
+		// do not hit Grok with a compact state it never stored.
+		if a.compactRecall != nil {
+			if responseID := gatewayCompactResponseID(sample.response, converted); responseID != "" {
+				a.compactRecall.remember(responseID, request.PromptCacheKey, continuation)
+			}
+		}
 		headers := resp.Header.Clone()
 		headers.Del("Content-Encoding")
 		headers.Set("Content-Length", strconv.Itoa(len(converted)))
@@ -172,6 +179,46 @@ func (a *Adapter) forwardGatewayCompactionWithPolicy(
 		}, nil
 	}
 	return nil, lastErr
+}
+
+func gatewayCompactResponseID(sample map[string]any, encoded []byte) string {
+	if sample != nil {
+		if id := strings.TrimSpace(stringField(sample, "id")); id != "" {
+			return id
+		}
+	}
+	// Fall back to parsing the encoded SSE/JSON we return to the client.
+	if id := strings.TrimSpace(extractResponseIDFromCompactionPayload(encoded)); id != "" {
+		return id
+	}
+	return ""
+}
+
+func extractResponseIDFromCompactionPayload(data []byte) string {
+	// Non-stream JSON body.
+	var payload map[string]any
+	if json.Unmarshal(data, &payload) == nil {
+		if id := strings.TrimSpace(stringField(payload, "id")); id != "" {
+			return id
+		}
+	}
+	// Stream: find "id":"resp_..." near response.completed.
+	text := string(data)
+	marker := `"id":"`
+	for _, part := range strings.Split(text, marker) {
+		if !strings.HasPrefix(part, "resp_") && !strings.HasPrefix(part, "cmp_") {
+			// still accept any quoted id after marker in completed events
+		}
+		end := strings.IndexByte(part, '"')
+		if end <= 0 {
+			continue
+		}
+		id := part[:end]
+		if strings.HasPrefix(id, "resp_") {
+			return id
+		}
+	}
+	return ""
 }
 
 // doResponseRequest posts a prepared Responses body to the given API base.

@@ -50,6 +50,7 @@ type Adapter struct {
 	modelsETags    map[uint64]string
 	replay         *reasoningreplay.ReasoningReplay
 	compaction     *gatewayCompactionCodec
+	compactRecall  *gatewayCompactRecall
 	fallbackMarker FallbackMarker
 	uploadIssuer   VideoUploadIssuer
 }
@@ -62,7 +63,8 @@ func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	agentID := uuid.NewString()
 	return &Adapter{
 		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: transport,
-		agentID: agentID, modelsETags: make(map[uint64]string), compaction: newGatewayCompactionCodec(cipher),
+		agentID: agentID, modelsETags: make(map[uint64]string),
+		compaction: newGatewayCompactionCodec(cipher), compactRecall: newGatewayCompactRecall(),
 	}
 }
 
@@ -128,6 +130,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				var n int
 				body, n, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
 				foreignCompactions += n
+				if rewritten, ok := resolveGatewayPreviousResponse(body, a.compactRecall); ok {
+					body = rewritten
+				}
 			}
 		} else {
 			// Expand gateway-owned compaction blobs; never forward foreign/native Grok
@@ -135,6 +140,9 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 			var n int
 			body, n, err = expandGatewayCompactionHistory(body, a.compaction, request.PromptCacheKey)
 			foreignCompactions += n
+			if rewritten, ok := resolveGatewayPreviousResponse(body, a.compactRecall); ok {
+				body = rewritten
+			}
 			if err == nil {
 				body, toolCompatibility, err = normalizeResponsesRequest(body, request.Model)
 			}
@@ -213,6 +221,39 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	resp, reqURL, err := a.doResponseRequest(ctx, request, accessToken, body, base)
 	if err != nil {
 		return nil, err
+	}
+	// If Grok rejects compact state, strip previous_response_id + scrub and retry once.
+	// Common when CLI continues a gateway-emulated compact via previous_response_id.
+	if resp.StatusCode == http.StatusBadRequest && request.Method == http.MethodPost && !isCompactPath(request.Path) {
+		errBody, truncated, readErr := provider.ReadDiagnosticBody(resp.Body)
+		_ = resp.Body.Close()
+		if readErr == nil && isCompactionBlobDecodeError(errBody) {
+			retryBody := body
+			if rewritten, ok := resolveGatewayPreviousResponse(retryBody, a.compactRecall); ok {
+				retryBody = rewritten
+			}
+			if stripped, ok := stripPreviousResponseID(retryBody); ok {
+				retryBody = stripped
+			}
+			if scrubbed, n := scrubUpstreamCompactionBlobs(retryBody); n > 0 {
+				retryBody = scrubbed
+			}
+			slog.Warn("compaction_blob_decode_retry",
+				"path", request.Path,
+				"prompt_cache_key_set", strings.TrimSpace(request.PromptCacheKey) != "",
+				"body_truncated", truncated,
+			)
+			if retryResp, retryURL, retryErr := a.doResponseRequest(ctx, request, accessToken, retryBody, base); retryErr == nil {
+				resp, reqURL, body = retryResp, retryURL, retryBody
+			} else {
+				// Restore original 400 body for the client.
+				resp = cloneBufferedResponse(resp, errBody, truncated)
+			}
+		} else if readErr == nil {
+			resp = cloneBufferedResponse(resp, errBody, truncated)
+		} else {
+			return nil, readErr
+		}
 	}
 	// 未标记账号：仅可回退操作在主地址明确 403 时用等价请求探测 XAI。
 	if a.shouldProbeXAIInferenceFallback(ctx, request.Credential, request.Method, request.Path, resp.StatusCode) {
