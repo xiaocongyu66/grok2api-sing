@@ -596,15 +596,16 @@ func (s *Service) DeleteAllAccountsForProvider(ctx context.Context, providerValu
 			return deleted, err
 		}
 		if len(ids) == 0 {
+			// Log only local counters — never request-derived provider (CodeQL log-injection).
 			if s.logger != nil {
-				s.logger.Info("delete_all_accounts_done", "provider", providerValue, "deleted", deleted, "rounds", round)
+				s.logger.Info("delete_all_accounts_done", "deleted", deleted, "rounds", round)
 			}
 			return deleted, nil
 		}
 		n, err := s.BatchDelete(ctx, ids)
 		deleted += n
 		if s.logger != nil {
-			s.logger.Info("delete_all_accounts_chunk", "provider", providerValue, "batch", len(ids), "deleted_rows", n, "total_deleted", deleted)
+			s.logger.Info("delete_all_accounts_chunk", "batch", len(ids), "deleted_rows", n, "total_deleted", deleted)
 		}
 		if err != nil {
 			return deleted, err
@@ -614,7 +615,7 @@ func (s *Service) DeleteAllAccountsForProvider(ctx context.Context, providerValu
 		}
 		if len(ids) < chunk {
 			if s.logger != nil {
-				s.logger.Info("delete_all_accounts_done", "provider", providerValue, "deleted", deleted, "rounds", round+1)
+				s.logger.Info("delete_all_accounts_done", "deleted", deleted, "rounds", round+1)
 			}
 			if deleted > 0 && s.poolNotify != nil {
 				s.poolNotify(providerValue)

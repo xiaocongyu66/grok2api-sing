@@ -205,7 +205,7 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
 
-	promptCacheKey := h.resolvePromptCacheKey(c, clientKey.ID, request.PromptCacheKey, "", promptcache.ConversationSeedFromChatBody(body), requestIDValue)
+	promptCacheKey := h.resolvePromptCacheKey(c, clientKey.ID, request.PromptCacheKey, "", promptcache.ConversationSeedFromChatBody(body))
 
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
@@ -248,7 +248,7 @@ func (h *Handler) createMessage(c *gin.Context) {
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
 
-	promptCacheKey := h.resolvePromptCacheKey(c, clientKey.ID, request.PromptCacheKey, "", promptcache.ConversationSeedFromMessagesBody(body), requestIDValue)
+	promptCacheKey := h.resolvePromptCacheKey(c, clientKey.ID, request.PromptCacheKey, "", promptcache.ConversationSeedFromMessagesBody(body))
 
 	result, err := h.gateway.CreateMessage(c.Request.Context(), withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
@@ -677,7 +677,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	requestID, _ := c.Get(middleware.RequestIDKey)
 	requestIDValue, _ := requestID.(string)
 
-	promptCacheKey := h.resolvePromptCacheKey(c, clientKey.ID, request.PromptCacheKey, request.PreviousResponseID, promptcache.ConversationSeedFromResponsesBody(body), requestIDValue)
+	promptCacheKey := h.resolvePromptCacheKey(c, clientKey.ID, request.PromptCacheKey, request.PreviousResponseID, promptcache.ConversationSeedFromResponsesBody(body))
 
 	input := withClientMeta(c, gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
@@ -755,7 +755,7 @@ func (h *Handler) handleOwnedResource(c *gin.Context, deleteResource bool) {
 	h.writeResult(c, result, false, 0, "")
 }
 
-func (h *Handler) resolvePromptCacheKey(c *gin.Context, clientKeyID uint64, explicit, previousResponseID, conversationSeed, requestID string) string {
+func (h *Handler) resolvePromptCacheKey(c *gin.Context, clientKeyID uint64, explicit, previousResponseID, conversationSeed string) string {
 	if h.affinity == nil {
 		return strings.TrimSpace(explicit)
 	}
@@ -791,14 +791,14 @@ func (h *Handler) resolvePromptCacheKey(c *gin.Context, clientKeyID uint64, expl
 		source = "fingerprint"
 	}
 	if err != nil {
-		slog.Warn("prompt_cache_resolve_failed", "request_id", requestID, "error", err.Error())
+		// Do not log client-supplied request_id (X-Request-ID can be tainted; CodeQL log-injection).
+		slog.Warn("prompt_cache_resolve_failed", "error", err.Error())
 		return strings.TrimSpace(explicit)
 	}
 	if key == "" {
 		key = strings.TrimSpace(explicit)
 	}
 	slog.Info("prompt_cache_resolved",
-		"request_id", requestID,
 		"source", source,
 		"key_set", key != "",
 		"key_fp", shortCacheFP(key),
@@ -829,8 +829,8 @@ func (h *Handler) writeResult(c *gin.Context, result *gateway.Result, stream boo
 			_ = h.affinity.RememberTurn(context.WithoutCancel(c.Request.Context()), clientKeyID, responseID, promptCacheKey)
 		}
 		if usage.InputTokens > 0 {
+			// Omit request_id: may be client X-Request-ID (CodeQL go/log-injection).
 			slog.Info("prompt_cache_usage",
-				"request_id", c.GetString(middleware.RequestIDKey),
 				"input_tokens", usage.InputTokens,
 				"cached_input_tokens", usage.CachedInputTokens,
 				"cache_hit_ratio", cacheHitRatio(usage.InputTokens, usage.CachedInputTokens),
