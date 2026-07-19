@@ -18,7 +18,7 @@ import { ErrorState } from "@/shared/components/data-state";
 
 export function SettingsPage() {
   const { t } = useTranslation();
-  const { form, settingsQuery, updateMutation, onInvalid, reset } = useSettings();
+  const { form, settingsQuery, updateMutation, onValid, onInvalid, reset } = useSettings();
 
   if (settingsQuery.isError) {
     return <ErrorState message={settingsQuery.error.message} onRetry={() => void settingsQuery.refetch()} />;
@@ -46,10 +46,7 @@ export function SettingsPage() {
   return (
     <form
       className="w-full space-y-8 [&_input]:border-transparent"
-      onSubmit={form.handleSubmit(
-        (values) => updateMutation.mutate(values),
-        onInvalid,
-      )}
+      onSubmit={form.handleSubmit(onValid, onInvalid)}
     >
       <header className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">

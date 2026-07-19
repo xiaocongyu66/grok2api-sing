@@ -1,7 +1,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
-import { useForm, type FieldErrors } from "react-hook-form";
+import { useForm, type FieldErrors, type Resolver, type SubmitHandler, type SubmitErrorHandler } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -29,7 +29,8 @@ export function useSettings() {
   const queryClient = useQueryClient();
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getSettings });
   const form = useForm<SettingsForm>({
-    resolver: zodResolver(settingsSchema),
+    // Cast: zod effects/refines can widen resolver generics under TS 6 + zod 4.
+    resolver: zodResolver(settingsSchema) as Resolver<SettingsForm>,
     mode: "onSubmit",
     reValidateMode: "onChange",
     shouldFocusError: true,
@@ -39,7 +40,6 @@ export function useSettings() {
       try {
         return await updateSettings(settingsQuery.data?.revision ?? "0", toSettingsDTO(config));
       } catch (error) {
-        // Surface DTO/build errors (e.g. undefined duration) instead of silent failure.
         throw error instanceof Error ? error : new Error(String(error));
       }
     },
@@ -58,11 +58,14 @@ export function useSettings() {
     }
   }, [form, settingsQuery.data]);
 
-  const onInvalid = (errors: FieldErrors<SettingsForm>) => {
+  const onValid: SubmitHandler<SettingsForm> = (values) => {
+    updateMutation.mutate(values);
+  };
+
+  const onInvalid: SubmitErrorHandler<SettingsForm> = (errors) => {
     const paths = collectErrorPaths(errors);
     const preview = paths.slice(0, 4).join(", ");
     const more = paths.length > 4 ? ` (+${paths.length - 4})` : "";
-    // Always toast — previous bug was validation fail with zero UI feedback.
     toast.error(
       paths.length > 0
         ? t("settings.validationFailed", { fields: `${preview}${more}`, defaultValue: `校验失败：${preview}${more}` })
@@ -82,6 +85,7 @@ export function useSettings() {
     form,
     settingsQuery,
     updateMutation,
+    onValid,
     onInvalid,
     reset: () => { if (settingsQuery.data) form.reset(toSettingsForm(settingsQuery.data.config)); },
   };
