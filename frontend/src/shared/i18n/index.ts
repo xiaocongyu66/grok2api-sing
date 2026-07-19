@@ -32,6 +32,8 @@ const resources = {
         allStrategy: "全部账号",
         missingStrategyDescription: "只为尚未有 Console 账号的 Web 号创建 Console，已有则跳过。",
         allStrategyDescription: "对完整 Web 号池幂等同步：已有 Console 会更新，没有则创建。",
+        syncMissing: "同步缺失账号",
+        syncAll: "同步全部账号",
       },
       console: {
         name: "Grok Console",
@@ -1083,6 +1085,8 @@ const resources = {
         allStrategy: "All accounts",
         missingStrategyDescription: "Only create Console accounts for Web accounts that do not have one yet.",
         allStrategyDescription: "Idempotently sync the full Web pool: update existing Console accounts and create missing ones.",
+        syncMissing: "Sync missing accounts",
+        syncAll: "Sync all accounts",
       },
       console: {
         name: "Grok Console",

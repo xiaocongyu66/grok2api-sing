@@ -898,7 +898,7 @@ export function AccountsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{t(webConsoleSyncTargets === "all" ? "webConsoleSync.allTitle" : "webConsoleSync.selectedTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>{t(webConsoleSyncTargets === "all" ? "webConsoleSync.allDescription" : "webConsoleSync.selectedDescription")}</AlertDialogDescription>
+            <AlertDialogDescription>{t(webConsoleSyncTargets === "all" ? "webConsoleSync.allDescription" : "webConsoleSync.selectedDescription", { count: Array.isArray(webConsoleSyncTargets) ? webConsoleSyncTargets.length : 0 })}</AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-2">
             <p id="web-console-sync-strategy" className="text-xs font-medium">{t("webConsoleSync.strategyTitle")}</p>
