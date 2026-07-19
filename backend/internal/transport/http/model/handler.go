@@ -93,14 +93,13 @@ func (h *Handler) list(c *gin.Context) {
 	}
 	items := make([]modelResponse, 0, len(values))
 	for _, value := range values {
-		items = append(items, newModelResponse(value))
-	}
-	// First page: append effort aliases only when their target is already in the model list
-	// (same dynamic source as GET /v1/models — not a fixed catalog dump).
-	if page <= 1 && filter.Provider == "" && (filter.Status == "" || filter.Status == "enabled") {
-		for _, alias := range h.service.ListPublicAliasRoutes(c.Request.Context(), search) {
-			items = append(items, newModelResponse(alias))
+		// Only real model_routes rows (non-zero id). Virtual alias rows must not appear
+		// in the admin/key picker: they shared id=0 so one checkbox toggled many labels,
+		// and PATCH client-keys rejected "0" as 无效模型 ID.
+		if value.ID == 0 {
+			continue
 		}
+		items = append(items, newModelResponse(value))
 	}
 	response.Success(c, http.StatusOK, gin.H{"items": items, "page": page, "pageSize": pageSize, "total": total})
 }

@@ -97,7 +97,7 @@ export function ClientKeysPage() {
         rpmLimit: values.rpmLimit,
         maxConcurrent: values.maxConcurrent,
         billingLimitUsdTicks: values.billingUnlimited ? 0 : Math.round(values.billingLimitUsd * USD_TICKS),
-        allowedModelIds: values.allowedModelIds,
+        allowedModelIds: values.allowedModelIds.filter((id) => id && id !== "0"),
         expiresAt: values.expiresAt ? new Date(values.expiresAt).toISOString() : "",
       };
       if (editing === "new") {
@@ -184,8 +184,14 @@ export function ClientKeysPage() {
   }
 
   function toggleModel(id: string): void {
-    const current = form.getValues("allowedModelIds");
-    form.setValue("allowedModelIds", current.includes(id) ? current.filter((value) => value !== id) : [...current, id], { shouldDirty: true });
+    // Only real model_route ids (uint64 > 0). Alias rows used to share id "0".
+    if (!id || id === "0") return;
+    const current = form.getValues("allowedModelIds").filter((value) => value && value !== "0");
+    form.setValue(
+      "allowedModelIds",
+      current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
+      { shouldDirty: true },
+    );
   }
 
   const result = keysQuery.data;
@@ -372,11 +378,12 @@ export function ClientKeysPage() {
                     <Input className="rounded-none border-0 bg-transparent pl-8 shadow-none focus-visible:bg-background focus-visible:ring-0" value={modelOptionsSearch} onChange={(event) => { setModelOptionsSearch(event.target.value); setModelOptionsPage(1); }} placeholder={t("keys.modelSearch")} aria-label={t("keys.modelSearch")} />
                   </div>
                   <div className="max-h-40 divide-y overflow-y-auto overscroll-contain sm:max-h-52">
-                    {modelsQuery.isPending ? <LoadingState className="min-h-24" /> : modelsQuery.data?.items.map((model) => {
+                    {modelsQuery.isPending ? <LoadingState className="min-h-24" /> : modelsQuery.data?.items.filter((model) => model.id && model.id !== "0").map((model) => {
                       const checked = selectedModels.includes(model.id);
-                      const controlId = `allowed-model-${model.id}`;
+                      // Key by id+publicId so duplicate labels never collapse; only real DB ids are selectable.
+                      const controlId = `allowed-model-${model.id}-${model.publicId}`;
                       return (
-                        <label key={model.id} htmlFor={controlId} className="flex h-9 cursor-pointer items-center gap-3 px-3 text-xs transition-colors hover:bg-accent/55">
+                        <label key={`${model.id}:${model.publicId}`} htmlFor={controlId} className="flex h-9 cursor-pointer items-center gap-3 px-3 text-xs transition-colors hover:bg-accent/55">
                           <Checkbox id={controlId} checked={checked} onCheckedChange={() => toggleModel(model.id)} aria-label={t("common.selectItem", { name: model.publicId })} />
                           <span className="min-w-0 flex-1 truncate font-medium" title={model.publicId}>{model.publicId}</span>
                           <span className="hidden max-w-[42%] shrink-0 truncate text-muted-foreground sm:block" title={model.upstreamModel}>{model.upstreamModel}</span>
