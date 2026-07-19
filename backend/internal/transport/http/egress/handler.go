@@ -416,9 +416,8 @@ func pathID(c *gin.Context) (uint64, bool) {
 }
 
 func (h *Handler) refreshClearance(c *gin.Context) {
-	id, err := parseID(c.Param("id"))
-	if err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidId", err.Error())
+	id, ok := pathID(c)
+	if !ok {
 		return
 	}
 	value, err := h.service.RefreshClearanceNode(c.Request.Context(), id)
