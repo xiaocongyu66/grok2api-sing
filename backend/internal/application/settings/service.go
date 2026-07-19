@@ -468,7 +468,11 @@ func (s *Service) snapshotLocked() Snapshot {
 
 func mergeEditable(current config.Config, input EditableConfig) (config.Config, error) {
 	next := current
-	next.Server.MaxConcurrentRequests = input.Server.MaxConcurrentRequests
+	// Admin UI historically omitted server capacity; zero must not wipe the live value
+	// or Validate fails with "server.maxConcurrentRequests 必须在 1 到 100000 之间".
+	if input.Server.MaxConcurrentRequests > 0 {
+		next.Server.MaxConcurrentRequests = input.Server.MaxConcurrentRequests
+	}
 	next.Frontend.PublicAPIBaseURLOverride = strings.TrimSpace(input.Frontend.PublicAPIBaseURL)
 	next.Provider.Build.BaseURL = strings.TrimSpace(input.ProviderBuild.BaseURL)
 	next.Provider.Build.ClientVersion = strings.TrimSpace(input.ProviderBuild.ClientVersion)
@@ -548,15 +552,26 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		}},
 	}
 	for _, item := range durations {
-		value, err := time.ParseDuration(strings.TrimSpace(item.value))
+		raw := strings.TrimSpace(item.value)
+		if raw == "" {
+			// Keep current value when admin payload omits optional duration fields
+			// (e.g. older clients without promptCacheAffinity.ttl).
+			continue
+		}
+		value, err := time.ParseDuration(raw)
 		if err != nil {
 			return config.Config{}, fmt.Errorf("%s 必须是有效时长", item.path)
 		}
 		item.set(config.Duration(value))
 	}
+	// Only overwrite prompt-cache flags when TTL is present or any flag is explicitly set
+	// via non-zero payload; always apply flags from input (admin form always sends them).
 	next.Routing.PromptCacheAffinity.Enabled = input.PromptCacheAffinity.Enabled
 	next.Routing.PromptCacheAffinity.Fingerprint = input.PromptCacheAffinity.Fingerprint
 	next.Routing.PromptCacheAffinity.Expire = input.PromptCacheAffinity.Expire
+	if strings.TrimSpace(input.PromptCacheAffinity.TTL) == "" && next.Routing.PromptCacheAffinity.TTL.Value() <= 0 {
+		next.Routing.PromptCacheAffinity.TTL = config.Duration(24 * time.Hour)
+	}
 	config.NormalizeRoutingRetry(&next)
 	config.NormalizeLegacyStatsig(&next)
 	if err := next.Validate(); err != nil {
