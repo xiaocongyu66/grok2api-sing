@@ -57,15 +57,20 @@ type ListFilter struct {
 	Sort     repository.SortQuery
 }
 
+// StaticCatalogSeeder re-applies built-in Web/Console model_routes (ReplaceProviderRoutes).
+// Wired from app bootstrap so model package does not import web/console providers.
+type StaticCatalogSeeder func(ctx context.Context) (int, error)
+
 // Service 负责上游模型发现、内部来源路由与对外模型名称维护。
 type Service struct {
-	models    repository.ModelRepository
-	accounts  repository.AccountRepository
-	account   *accountapp.Service
-	providers *provider.Registry
-	bulkPool  *batch.Pool
-	logger    *slog.Logger
-	syncAll   singleflight.Group
+	models              repository.ModelRepository
+	accounts            repository.AccountRepository
+	account             *accountapp.Service
+	providers           *provider.Registry
+	bulkPool            *batch.Pool
+	logger              *slog.Logger
+	syncAll             singleflight.Group
+	staticCatalogSeeder StaticCatalogSeeder
 }
 
 func NewService(models repository.ModelRepository, accounts repository.AccountRepository, accountService *accountapp.Service, providers *provider.Registry) *Service {
@@ -81,6 +86,13 @@ func (s *Service) SetBulkPool(pool *batch.Pool) {
 func (s *Service) SetLogger(logger *slog.Logger) {
 	if logger != nil {
 		s.logger = logger
+	}
+}
+
+// SetStaticCatalogSeeder installs the Web/Console catalog reseed hook used by admin「同步模型」.
+func (s *Service) SetStaticCatalogSeeder(seeder StaticCatalogSeeder) {
+	if s != nil {
+		s.staticCatalogSeeder = seeder
 	}
 }
 
@@ -434,6 +446,21 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 	if len(providerValues) == 0 {
 		return 0, fmt.Errorf("没有已注册的 Provider")
 	}
+
+	startedAt := time.Now()
+	// Always reseed built-in Web/Console routes first. Admin「同步模型」used to only
+	// refresh account capability rows + Build discovery, so Console multi-agent etc.
+	// never reappeared if missing from model_routes (and the UI only allows adding Build).
+	catalogRoutes := 0
+	if s.staticCatalogSeeder != nil {
+		n, err := s.staticCatalogSeeder(ctx)
+		if err != nil {
+			return 0, err
+		}
+		catalogRoutes = n
+		s.logger.Info("model_static_catalog_reseeded", "routes", catalogRoutes)
+	}
+
 	credentials := make([]account.Credential, 0)
 	for _, providerValue := range providerValues {
 		values, err := s.accounts.ListEnabled(ctx, providerValue)
@@ -443,6 +470,14 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 		credentials = append(credentials, values...)
 	}
 	if len(credentials) == 0 {
+		// No accounts: still succeed if static catalogs were written (Console/Web routes).
+		if catalogRoutes > 0 {
+			s.logger.Info("model_bulk_sync_completed",
+				"total", 0, "static", 0, "remote", 0, "catalog_routes", catalogRoutes,
+				"succeeded", 0, "duration_ms", time.Since(startedAt).Milliseconds(),
+			)
+			return catalogRoutes, nil
+		}
 		return 0, fmt.Errorf("没有可用于模型同步的账号")
 	}
 
@@ -460,6 +495,11 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 
 	uniqueModels := make(map[account.Provider]map[string]struct{}, len(providerValues))
 	addModels := func(providerValue account.Provider, models []string) {
+		// Static providers already reseeded full catalog routes above; do not also
+		// UpsertDiscovered them as "discovered" rows (would duplicate public IDs).
+		if s.staticModelCatalog(providerValue) {
+			return
+		}
 		providerModels := uniqueModels[providerValue]
 		if providerModels == nil {
 			providerModels = make(map[string]struct{})
@@ -475,7 +515,6 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 
 	succeeded := 0
 	var lastErr error
-	startedAt := time.Now()
 
 	staticOK, staticErr := s.syncStaticCatalogAccounts(ctx, staticCreds, addModels)
 	succeeded += staticOK
@@ -518,16 +557,17 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 
 	s.logger.Info("model_bulk_sync_completed",
 		"total", len(credentials), "static", len(staticCreds), "remote", len(remoteCreds),
-		"succeeded", succeeded, "duration_ms", time.Since(startedAt).Milliseconds(),
+		"catalog_routes", catalogRoutes, "succeeded", succeeded,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
 		"pool_limit", s.bulkPool.Limit(), "error", lastErr,
 	)
-	if succeeded == 0 {
+	if succeeded == 0 && catalogRoutes == 0 {
 		if lastErr != nil {
 			return 0, lastErr
 		}
 		return 0, fmt.Errorf("没有账号成功同步模型")
 	}
-	syncedModels := 0
+	syncedModels := catalogRoutes
 	for _, providerValue := range providerValues {
 		providerModels := uniqueModels[providerValue]
 		if len(providerModels) == 0 {

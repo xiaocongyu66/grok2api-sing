@@ -261,19 +261,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	// mostly static bulk SQL + a few Build HTTP /models calls; sharing pool_limit=6 made
 	// admin "同步模型" take 8+ minutes across ~20k Web accounts before gateway timeout.
 	modelService.SetLogger(logger)
-	if err := modelRepo.ReplaceProviderRoutes(ctx, account.ProviderWeb, webprovider.Routes()); err != nil {
-		if runtimeStore != nil {
-			_ = runtimeStore.Close()
+	// Startup + admin「同步模型」both reseed Web/Console built-in routes (not Build).
+	seedStaticCatalogs := func(seedCtx context.Context) (int, error) {
+		webRoutes := webprovider.Routes()
+		if err := modelRepo.ReplaceProviderRoutes(seedCtx, account.ProviderWeb, webRoutes); err != nil {
+			return 0, fmt.Errorf("Grok Web 模型目录: %w", err)
 		}
-		database.Close()
-		return nil, fmt.Errorf("初始化 Grok Web 模型目录: %w", err)
+		consoleRoutes := consoleprovider.Routes()
+		if err := modelRepo.ReplaceProviderRoutes(seedCtx, account.ProviderConsole, consoleRoutes); err != nil {
+			return 0, fmt.Errorf("Grok Console 模型目录: %w", err)
+		}
+		return len(webRoutes) + len(consoleRoutes), nil
 	}
-	if err := modelRepo.ReplaceProviderRoutes(ctx, account.ProviderConsole, consoleprovider.Routes()); err != nil {
+	modelService.SetStaticCatalogSeeder(seedStaticCatalogs)
+	if _, err := seedStaticCatalogs(ctx); err != nil {
 		if runtimeStore != nil {
 			_ = runtimeStore.Close()
 		}
 		database.Close()
-		return nil, fmt.Errorf("初始化 Grok Console 模型目录: %w", err)
+		return nil, fmt.Errorf("初始化静态模型目录: %w", err)
 	}
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
 	accountSyncService.SetUpstreamSyncPolicy(upstreamSyncPolicy(cfg))
