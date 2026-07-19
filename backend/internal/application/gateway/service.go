@@ -450,6 +450,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	}
 	publicModel := modeldomain.ExternalPublicID(route.Provider, route.PublicID)
 	input.PublicModel = publicModel
+	// Dual thinking control (same idea as jiujiu multi-agent-* aliases):
+	//  1) Model alias: client sends model=grok-4.5-high → force effort=high
+	//  2) Base model + body: client sends model=grok-4.5 and reasoning.effort / reasoning_effort
+	//     → leave body as-is (no rewrite). Alias effort always wins when present.
 	if aliasEffort != "" {
 		input.Body, err = rewriteAliasedModel(input.Body, publicModel, aliasEffort, operation)
 		if err != nil {
@@ -943,6 +947,10 @@ func (s *Service) queueAccountModelSync(accountID uint64) {
 	}()
 }
 
+// rewriteAliasedModel rewrites a client alias request onto the real public model id
+// and injects a fixed thinking effort. Used when the client selected an effort alias
+// (e.g. grok-4.5-high or multi-agent-xhigh). For base model + explicit effort in the
+// body, callers skip this function so parameter-based thinking still works.
 func rewriteAliasedModel(body []byte, publicModel, reasoningEffort string, operation audit.Operation) ([]byte, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -952,8 +960,10 @@ func rewriteAliasedModel(body []byte, publicModel, reasoningEffort string, opera
 	if reasoningEffort != "" {
 		switch operation {
 		case audit.OperationChat:
+			// OpenAI Chat Completions style
 			payload["reasoning_effort"] = reasoningEffort
 		case audit.OperationMessages:
+			// Anthropic Messages style
 			config, _ := payload["output_config"].(map[string]any)
 			if config == nil {
 				config = make(map[string]any)
@@ -961,6 +971,7 @@ func rewriteAliasedModel(body []byte, publicModel, reasoningEffort string, opera
 			config["effort"] = reasoningEffort
 			payload["output_config"] = config
 		default:
+			// Responses API style
 			reasoning, _ := payload["reasoning"].(map[string]any)
 			if reasoning == nil {
 				reasoning = make(map[string]any)

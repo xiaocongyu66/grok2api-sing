@@ -49,3 +49,24 @@ func TestRewriteAliasedModelAppliesOperationEffort(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteAliasedModelSupportsBuild45Efforts(t *testing.T) {
+	// grok-4.5-low/medium/high/xhigh rewrite to base model + effort (Build path).
+	for _, effort := range []string{"low", "medium", "high", "xhigh"} {
+		body, err := rewriteAliasedModel([]byte(`{"model":"grok-4.5-`+effort+`","input":"hi"}`), "grok-4.5", effort, audit.OperationResponses)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["model"] != "grok-4.5" {
+			t.Fatalf("model = %#v", payload["model"])
+		}
+		reasoning, _ := payload["reasoning"].(map[string]any)
+		if reasoning["effort"] != effort {
+			t.Fatalf("effort %q: reasoning = %#v", effort, reasoning)
+		}
+	}
+}

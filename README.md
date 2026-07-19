@@ -173,6 +173,27 @@ Grok Console 固定使用 `store: false`，不支持 `previous_response_id`、Re
 
 对外模型名称不带 Provider 前缀，例如 `grok-4.5`。内部上游路由使用 `Build/`、`Web/`、`Console/` 前缀区分实际来源；Grok Build 模型根据账号能力动态同步，请以管理端模型页或 `GET /v1/models` 为准。
 
+Build 思考档位支持**两种切换方式**（可并存；账号同步到 `grok-4.5` 后别名会出现在 `/v1/models`）：
+
+1. **换模型名（别名）** — 客户端只能选 model、不能改 body 时用：
+
+| 别名 | 实际上游 | 固定思考 |
+| :-- | :-- | :-- |
+| `grok-4.5-low` | `grok-4.5` | low |
+| `grok-4.5-medium` | `grok-4.5` | medium |
+| `grok-4.5-high` | `grok-4.5` | high |
+| `grok-4.5-xhigh` | `grok-4.5` | xhigh |
+
+2. **换参数** — 使用 base 模型并自行传思考档位（Responses / Chat / Messages 均可）：
+
+```json
+{ "model": "grok-4.5", "reasoning": { "effort": "high" } }
+```
+
+Chat 也可用 `"reasoning_effort": "high"`。若同时用了别名（如 `grok-4.5-high`）又传了 effort，**以别名固定档位为准**。
+
+密钥权限请绑定真实路由 `grok-4.5`；请求体可用 base 或上述别名。
+
 升级时会原位迁移内部路由并保留路由主键、客户端密钥权限和旧名称别名。多个来源可以提供同一个对外模型名称；网关会按客户端权限、协议能力和账号可用性选择来源。带 Provider 前缀的名称仍可作为兼容入口，用于显式指定渠道。
 
 Grok Web 内置模型：
