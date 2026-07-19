@@ -45,7 +45,7 @@ bootstrapAdmin:
 	if cfg.BootstrapAdmin.Username != "admin" || cfg.BootstrapAdmin.Password != "password123" {
 		t.Fatalf("bootstrapAdmin = %#v", cfg.BootstrapAdmin)
 	}
-	if cfg.Batch.ImportConcurrency != 5 || cfg.Batch.ConversionConcurrency != 3 || cfg.Batch.SyncConcurrency != 5 || cfg.Batch.RefreshConcurrency != 5 || cfg.Batch.RandomDelay.Value() != 500*time.Millisecond {
+	if cfg.Batch.ImportConcurrency != 6 || cfg.Batch.ConversionConcurrency != 3 || cfg.Batch.SyncConcurrency != 6 || cfg.Batch.RefreshConcurrency != 6 || cfg.Batch.RandomDelay.Value() != 2*time.Second {
 		t.Fatalf("batch defaults = %#v", cfg.Batch)
 	}
 	expectedDatabasePath := filepath.Join(dir, "data", "backend.db")

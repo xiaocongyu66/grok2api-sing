@@ -15,6 +15,7 @@ type candidateScore struct {
 	index        int
 	tier         int
 	billingFresh bool
+	failureCount int
 	inFlight     int
 	remaining    float64
 	lastSelected time.Time
@@ -70,6 +71,10 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 	if left.Priority != right.Priority {
 		return left.Priority > right.Priority
 	}
+	// Optional: push recently-failed accounts to the back of the pool.
+	if leftScore.failureCount != rightScore.failureCount {
+		return leftScore.failureCount < rightScore.failureCount
+	}
 	if leftScore.billingFresh != rightScore.billingFresh {
 		return leftScore.billingFresh
 	}
@@ -114,11 +119,15 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 	}
 
 	s.mu.Lock()
+	deprioritizeFailed := s.deprioritizeFailedAccounts
 	scores := make([]candidateScore, len(values))
 	for index, candidate := range values {
 		score := candidateScore{
 			index: index, tier: tierOrderRank(tierOrder, candidate.Credential.WebTier),
 			inFlight: inFlight[index], lastSelected: s.lastSelectedAt[candidate.Credential.ID],
+		}
+		if deprioritizeFailed {
+			score.failureCount = candidate.Credential.FailureCount
 		}
 		// Prefer accounts with more local window quota (Web mode / Console). Billing
 		// remaining is only meaningful for Build paid accounts and is used as fallback.

@@ -198,11 +198,15 @@ export function SettingsPage() {
               <SettingsField controlId="routing-retry-server-errors" label={t("settings.routing.retryServerErrors")}>
                 <Controller control={form.control} name="routing.retryServerErrors" render={({ field }) => <div className="flex h-8 items-center"><Switch id="routing-retry-server-errors" checked={field.value} onCheckedChange={field.onChange} /></div>} />
               </SettingsField>
+              <SettingsField controlId="routing-deprioritize-failed" label={t("settings.routing.deprioritizeFailedAccounts")}>
+                <Controller control={form.control} name="routing.deprioritizeFailedAccounts" render={({ field }) => <div className="flex h-8 items-center"><Switch id="routing-deprioritize-failed" checked={field.value} onCheckedChange={field.onChange} /></div>} />
+              </SettingsField>
               <SettingsField controlId="routing-retry-status-codes" className="sm:col-span-2" label={t("settings.routing.retryStatusCodes")} error={form.formState.errors.routing?.retryStatusCodesText?.message}>
                 <Input id="routing-retry-status-codes" placeholder="402, 403, 429, 503" {...form.register("routing.retryStatusCodesText")} />
               </SettingsField>
             </div>
-            <p className="mt-3 text-xs text-muted-foreground">{t("settings.routing.roundRobinHint")}</p>
+            <p className="mt-3 text-xs text-muted-foreground">{t("settings.routing.deprioritizeFailedAccountsHelp")}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{t("settings.routing.roundRobinHint")}</p>
             <p className="mt-1 text-xs text-muted-foreground">{t("settings.routing.retryHint")}</p>
           </SettingsSection>
 

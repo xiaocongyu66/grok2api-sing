@@ -102,13 +102,14 @@ type dbBufferConfigDTO struct {
 }
 
 type routingConfigDTO struct {
-	StickyTTL         string `json:"stickyTTL"`
-	CooldownBase      string `json:"cooldownBase"`
-	CooldownMax       string `json:"cooldownMax"`
-	CapacityWait      string `json:"capacityWait"`
-	MaxAttempts       int    `json:"maxAttempts"`
-	RetryStatusCodes  []int  `json:"retryStatusCodes"`
-	RetryServerErrors bool   `json:"retryServerErrors"`
+	StickyTTL                  string `json:"stickyTTL"`
+	CooldownBase               string `json:"cooldownBase"`
+	CooldownMax                string `json:"cooldownMax"`
+	CapacityWait               string `json:"capacityWait"`
+	MaxAttempts                int    `json:"maxAttempts"`
+	RetryStatusCodes           []int  `json:"retryStatusCodes"`
+	RetryServerErrors          bool   `json:"retryServerErrors"`
+	DeprioritizeFailedAccounts bool   `json:"deprioritizeFailedAccounts"`
 }
 
 type auditConfigDTO struct {
@@ -204,6 +205,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			StickyTTL: value.Routing.StickyTTL, CooldownBase: value.Routing.CooldownBase,
 			CooldownMax: value.Routing.CooldownMax, CapacityWait: value.Routing.CapacityWait, MaxAttempts: value.Routing.MaxAttempts,
 			RetryStatusCodes: append([]int(nil), value.Routing.RetryStatusCodes...), RetryServerErrors: value.Routing.RetryServerErrors,
+			DeprioritizeFailedAccounts: value.Routing.DeprioritizeFailedAccounts,
 		},
 		Audit: settingsapp.AuditConfig{
 			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval,
@@ -275,6 +277,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				StickyTTL: config.Routing.StickyTTL, CooldownBase: config.Routing.CooldownBase,
 				CooldownMax: config.Routing.CooldownMax, CapacityWait: config.Routing.CapacityWait, MaxAttempts: config.Routing.MaxAttempts,
 				RetryStatusCodes: append([]int(nil), config.Routing.RetryStatusCodes...), RetryServerErrors: config.Routing.RetryServerErrors,
+				DeprioritizeFailedAccounts: config.Routing.DeprioritizeFailedAccounts,
 			},
 			Audit: auditConfigDTO{
 				BufferSize: config.Audit.BufferSize, BatchSize: config.Audit.BatchSize, FlushInterval: config.Audit.FlushInterval,

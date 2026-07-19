@@ -300,6 +300,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	dashboardService.SetConnectionsTracker(connectionTracker)
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
 	selector.SetLogger(logger)
+	selector.SetDeprioritizeFailedAccounts(cfg.Routing.DeprioritizeFailedAccounts)
 	accountService.SetPoolNotify(selector.InvalidateProvider)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
 	gatewayService.SetLogger(logger)
@@ -362,6 +363,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			accountService.SetDBBufferRedis(redisRuntime.Client(), next.RuntimeStore.Redis.KeyPrefix)
 		}
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
+	selector.SetDeprioritizeFailedAccounts(next.Routing.DeprioritizeFailedAccounts)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{
 			Enabled: next.Routing.ReasoningReplayEnabled,
 			TTL:     next.Routing.ReasoningReplayTTL.Value(),

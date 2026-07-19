@@ -102,13 +102,16 @@ type ProviderBuildConfig struct {
 
 // RoutingConfig 定义会话粘性、冷却和故障切换边界。
 type RoutingConfig struct {
-	StickyTTL         time.Duration
-	CooldownBase      time.Duration
-	CooldownMax       time.Duration
-	CapacityWait      time.Duration
-	MaxAttempts       int
-	RetryStatusCodes  []int
-	RetryServerErrors bool
+	StickyTTL                  time.Duration
+	CooldownBase               time.Duration
+	CooldownMax                time.Duration
+	CapacityWait               time.Duration
+	MaxAttempts                int
+	RetryStatusCodes           []int
+	RetryServerErrors          bool
+	// DeprioritizeFailedAccounts puts accounts with higher failure_count last when selecting
+	// and when batch-syncing quotas (switchable; default on).
+	DeprioritizeFailedAccounts bool
 }
 
 // AuditConfig 定义请求审计异步写入参数。

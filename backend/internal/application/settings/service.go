@@ -81,13 +81,14 @@ type MediaConfig struct {
 
 // RoutingConfig 是管理接口使用的路由可编辑输入。
 type RoutingConfig struct {
-	StickyTTL         string
-	CooldownBase      string
-	CooldownMax       string
-	CapacityWait      string
-	MaxAttempts       int
-	RetryStatusCodes  []int
-	RetryServerErrors bool
+	StickyTTL                  string
+	CooldownBase               string
+	CooldownMax                string
+	CapacityWait               string
+	MaxAttempts                int
+	RetryStatusCodes           []int
+	RetryServerErrors          bool
+	DeprioritizeFailedAccounts bool
 }
 
 // PromptCacheAffinityConfig is the admin-editable prompt-cache affinity policy.
@@ -336,6 +337,7 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		StickyTTL: config.Duration(value.Routing.StickyTTL), CooldownBase: config.Duration(value.Routing.CooldownBase),
 		CooldownMax: config.Duration(value.Routing.CooldownMax), CapacityWait: config.Duration(capacityWait), MaxAttempts: value.Routing.MaxAttempts,
 		RetryStatusCodes: append([]int(nil), value.Routing.RetryStatusCodes...), RetryServerErrors: value.Routing.RetryServerErrors,
+		DeprioritizeFailedAccounts: value.Routing.DeprioritizeFailedAccounts,
 		ReasoningReplayEnabled: replayEnabled, ReasoningReplayTTL: replayTTL, ReasoningReplayMaxEntries: replayMax,
 	}
 	if base.Routing.ReasoningReplayTTL.Value() <= 0 {
@@ -419,6 +421,7 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			StickyTTL: value.Routing.StickyTTL.Value(), CooldownBase: value.Routing.CooldownBase.Value(),
 			CooldownMax: value.Routing.CooldownMax.Value(), CapacityWait: value.Routing.CapacityWait.Value(), MaxAttempts: value.Routing.MaxAttempts,
 			RetryStatusCodes: append([]int(nil), value.Routing.RetryStatusCodes...), RetryServerErrors: value.Routing.RetryServerErrors,
+			DeprioritizeFailedAccounts: value.Routing.DeprioritizeFailedAccounts,
 		},
 		Audit: settingsdomain.AuditConfig{
 			BufferSize: value.Audit.BufferSize, BatchSize: value.Audit.BatchSize, FlushInterval: value.Audit.FlushInterval.Value(),
@@ -503,6 +506,7 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	next.Routing.MaxAttempts = input.Routing.MaxAttempts
 	next.Routing.RetryStatusCodes = append([]int(nil), input.Routing.RetryStatusCodes...)
 	next.Routing.RetryServerErrors = input.Routing.RetryServerErrors
+	next.Routing.DeprioritizeFailedAccounts = input.Routing.DeprioritizeFailedAccounts
 	next.Audit.BufferSize = input.Audit.BufferSize
 	next.Audit.BatchSize = input.Audit.BatchSize
 	next.ClientKeyDefaults.RPMLimit = input.ClientKeyDefaults.RPMLimit
@@ -595,6 +599,7 @@ func toEditable(cfg config.Config) EditableConfig {
 			StickyTTL: cfg.Routing.StickyTTL.String(), CooldownBase: cfg.Routing.CooldownBase.String(),
 			CooldownMax: cfg.Routing.CooldownMax.String(), CapacityWait: cfg.Routing.CapacityWait.String(), MaxAttempts: cfg.Routing.MaxAttempts,
 			RetryStatusCodes: append([]int(nil), cfg.Routing.RetryStatusCodes...), RetryServerErrors: cfg.Routing.RetryServerErrors,
+			DeprioritizeFailedAccounts: cfg.Routing.DeprioritizeFailedAccounts,
 		},
 		PromptCacheAffinity: PromptCacheAffinityConfig{
 			Enabled: cfg.Routing.PromptCacheAffinity.Enabled, Fingerprint: cfg.Routing.PromptCacheAffinity.Fingerprint,

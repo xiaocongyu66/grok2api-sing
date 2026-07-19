@@ -353,7 +353,9 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 
 func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
 	var rows []accountModel
-	err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).Order("priority DESC, id ASC").Find(&rows).Error
+	// Prefer healthy accounts first so bulk sync / routing snapshots hit good tokens before
+	// recently failed ones (failure_count ASC). Priority still wins within the same health band.
+	err := r.db.db.WithContext(ctx).Preload("Credential").Preload("WebProfile").Where("provider = ? AND enabled = ? AND auth_status = ?", provider, true, account.AuthStatusActive).Order("failure_count ASC, priority DESC, id ASC").Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +377,8 @@ func (r *AccountRepository) ListEnabledAccountIDs(ctx context.Context, provider 
 			Where("credential.encrypted_refresh <> ''")
 	}
 	var ids []uint64
-	err := query.Order("account.priority DESC, account.id ASC").Scan(&ids).Error
+	// Slow auto-sync and bulk quota jobs process healthy accounts first; failed ones last.
+	err := query.Order("account.failure_count ASC, account.priority DESC, account.id ASC").Scan(&ids).Error
 	return ids, err
 }
 
@@ -1322,7 +1325,8 @@ func (r *AccountRepository) ListStaleWebQuotaAccountIDs(ctx context.Context, bef
 		Where("account.provider = ? AND account.enabled = ? AND account.auth_status = ?", account.ProviderWeb, true, account.AuthStatusActive).
 		Group("account.id").
 		Having("MAX(quota.synced_at) IS NULL OR MAX(quota.synced_at) < ?", before.UTC()).
-		Order("MIN(quota.synced_at) ASC, account.id ASC").
+		// Healthy accounts first so slow catch-up spends budget on usable tokens.
+		Order("MIN(account.failure_count) ASC, MIN(quota.synced_at) ASC, account.id ASC").
 		Limit(limit).
 		Scan(&ids).Error
 	return ids, err

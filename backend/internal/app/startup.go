@@ -17,9 +17,10 @@ const (
 	startupRecoveryBudget    = 20 * time.Second
 	startupCriticalWindow    = 2 * time.Minute
 	startupCriticalLimit     = 100
-	statsigWarmupInterval    = 15 * time.Minute
-	webQuotaStaleAfter       = 30 * time.Minute
-	webQuotaCatchupEvery     = 30 * time.Minute
+	statsigWarmupInterval = 15 * time.Minute
+	// Slower catch-up cadence: spread quota sync across proxies with concurrency 6.
+	webQuotaStaleAfter       = 45 * time.Minute
+	webQuotaCatchupEvery     = 45 * time.Minute
 	modelCatalogStaleAfter   = 24 * time.Hour
 	modelCatalogCatchupEvery = 6 * time.Hour
 )
@@ -369,9 +370,10 @@ func (a *Application) runWebQuotaCatchup(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		ids, err := a.accountRepo.ListStaleWebQuotaAccountIDs(ctx, time.Now().UTC().Add(-webQuotaStaleAfter), 250)
+		// Small batches + long timeout: sync concurrency defaults to 6 with random delay.
+		ids, err := a.accountRepo.ListStaleWebQuotaAccountIDs(ctx, time.Now().UTC().Add(-webQuotaStaleAfter), 60)
 		if err == nil && len(ids) > 0 {
-			runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			var succeeded int
 			succeeded, _, err = a.accounts.SyncWebQuotaAccounts(runCtx, ids)
 			cancel()

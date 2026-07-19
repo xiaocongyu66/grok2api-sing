@@ -103,6 +103,7 @@ export const settingsSchema = z.object({
       }
     }),
     retryServerErrors: z.boolean(),
+    deprioritizeFailedAccounts: z.boolean(),
   }).refine((value) => durationSeconds(value.cooldownMax) >= durationSeconds(value.cooldownBase), { path: ["cooldownMax"] }),
   promptCacheAffinity: z.object({
     enabled: z.boolean(),
@@ -156,6 +157,7 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
       cooldownMax: parseDuration(config.routing.cooldownMax), capacityWait: parseDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
       retryStatusCodesText: formatStatusCodeList(config.routing.retryStatusCodes ?? [402, 403, 429, 503]),
       retryServerErrors: config.routing.retryServerErrors ?? true,
+      deprioritizeFailedAccounts: config.routing.deprioritizeFailedAccounts ?? true,
     },
     promptCacheAffinity: {
       enabled: config.promptCacheAffinity?.enabled ?? true,
@@ -190,6 +192,7 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
       cooldownMax: formatDuration(config.routing.cooldownMax), capacityWait: formatDuration(config.routing.capacityWait), maxAttempts: config.routing.maxAttempts,
       retryStatusCodes: parseStatusCodeList(config.routing.retryStatusCodesText) ?? [402, 403, 429, 503],
       retryServerErrors: config.routing.retryServerErrors,
+      deprioritizeFailedAccounts: config.routing.deprioritizeFailedAccounts,
     },
     promptCacheAffinity: {
       enabled: config.promptCacheAffinity.enabled,

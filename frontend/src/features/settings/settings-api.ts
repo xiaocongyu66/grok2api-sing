@@ -37,6 +37,7 @@ export type SettingsConfigDTO = {
   };
   routing: {
     stickyTTL: string; cooldownBase: string; cooldownMax: string; capacityWait: string; maxAttempts: number;
+    deprioritizeFailedAccounts?: boolean;
     retryStatusCodes: number[]; retryServerErrors: boolean;
   };
   promptCacheAffinity: { enabled: boolean; fingerprint: boolean; expire: boolean; ttl: string };
@@ -311,7 +312,7 @@ const settingsConfigValidator = hasShape({
   }),
   media: hasShape({ maxImageBytes: isNumber, maxTotalBytes: isNumber, cleanupThresholdPercent: isNumber, cleanupInterval: isString }),
   routing: hasShape({
-    stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber,
+    stickyTTL: isString, cooldownBase: isString, cooldownMax: isString, capacityWait: isString, maxAttempts: isNumber, deprioritizeFailedAccounts: isOptional(isBoolean),
     retryStatusCodes: isArrayOf(isNumber), retryServerErrors: isBoolean,
   }),
   promptCacheAffinity: hasShape({

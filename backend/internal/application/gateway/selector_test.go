@@ -464,6 +464,46 @@ func TestSelectorPrefersHigherQuotaWindowRemaining(t *testing.T) {
 	}
 }
 
+func TestSelectorDeprioritizesFailedAccountsWhenEnabled(t *testing.T) {
+	now := time.Now().UTC()
+	selector := &Selector{
+		concurrency:                &batchConcurrencyLimiter{values: map[string]int{}},
+		lastSelectedAt:             map[uint64]time.Time{},
+		deprioritizeFailedAccounts: true,
+	}
+	values := []account.RoutingCandidate{
+		{Credential: account.Credential{ID: 1, Priority: 10, FailureCount: 5}, QuotaWindow: &account.QuotaWindow{Mode: "console", Remaining: 20, SyncedAt: &now}},
+		{Credential: account.Credential{ID: 2, Priority: 10, FailureCount: 0}, QuotaWindow: &account.QuotaWindow{Mode: "console", Remaining: 10, SyncedAt: &now}},
+		{Credential: account.Credential{ID: 3, Priority: 10, FailureCount: 2}, QuotaWindow: &account.QuotaWindow{Mode: "console", Remaining: 15, SyncedAt: &now}},
+	}
+	plan, err := selector.planCandidates(context.Background(), values, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordered := make([]uint64, 0, len(values))
+	for candidate, ok := plan.Next(); ok; candidate, ok = plan.Next() {
+		ordered = append(ordered, candidate.Credential.ID)
+	}
+	// Failure count first: 2 (0 fails) -> 3 (2 fails) -> 1 (5 fails), remaining is secondary.
+	if expected := []uint64{2, 3, 1}; !slices.Equal(ordered, expected) {
+		t.Fatalf("候选顺序 = %v, want %v", ordered, expected)
+	}
+
+	selector.SetDeprioritizeFailedAccounts(false)
+	plan, err = selector.planCandidates(context.Background(), values, now, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordered = ordered[:0]
+	for candidate, ok := plan.Next(); ok; candidate, ok = plan.Next() {
+		ordered = append(ordered, candidate.Credential.ID)
+	}
+	// Switch off: remaining wins again (20, 15, 10).
+	if expected := []uint64{1, 3, 2}; !slices.Equal(ordered, expected) {
+		t.Fatalf("开关关闭后候选顺序 = %v, want %v", ordered, expected)
+	}
+}
+
 func TestSelectorConsumeQuotaStartsConsoleRotateTimer(t *testing.T) {
 	key := candidateCacheKey{provider: account.ProviderConsole, upstreamModel: "grok-4.3", quotaMode: "console"}
 	selector := &Selector{candidates: map[candidateCacheKey]candidateSnapshot{

@@ -257,6 +257,9 @@ type RoutingConfig struct {
 	RetryStatusCodes []int `yaml:"retryStatusCodes"`
 	// RetryServerErrors retries any status >= 500 when true (default).
 	RetryServerErrors bool `yaml:"retryServerErrors"`
+	// DeprioritizeFailedAccounts ranks accounts with higher failure_count last for
+	// request routing and slow quota-sync queues. Switchable; default true.
+	DeprioritizeFailedAccounts bool `yaml:"deprioritizeFailedAccounts"`
 	// PromptCacheAffinity stabilizes x-grok-conv-id for upstream prompt-cache hits.
 	PromptCacheAffinity PromptCacheAffinityConfig `yaml:"promptCacheAffinity"`
 	// ReasoningReplay holds previous-turn encrypted reasoning for multi-turn Build
@@ -757,10 +760,10 @@ func defaultConfig() Config {
 			},
 		},
 		Batch: BatchConfig{
-			// Keep bulk workers modest so small Postgres plans (e.g. Aiven) still have headroom.
-			// Conversion can be DB heavy (multiple Gets + links per account).
-			ImportConcurrency: 5, ConversionConcurrency: 3, SyncConcurrency: 5,
-			RefreshConcurrency: 5, RandomDelay: Duration(500 * time.Millisecond),
+			// Slow bulk workers (default 6) + jitter reduce ban risk while spreading
+			// load across the egress proxy pool (least-inflight selection).
+			ImportConcurrency: 6, ConversionConcurrency: 3, SyncConcurrency: 6,
+			RefreshConcurrency: 6, RandomDelay: Duration(2 * time.Second),
 			DBBuffer: DBBufferConfig{Enabled: false, Driver: "none", Path: ""},
 		},
 		Media: MediaConfig{
@@ -769,13 +772,14 @@ func defaultConfig() Config {
 			Local: LocalMediaConfig{Path: "./data/media"},
 		},
 		Routing: RoutingConfig{
-			StickyTTL:         Duration(time.Hour),
-			CooldownBase:      Duration(30 * time.Second),
-			CooldownMax:       Duration(30 * time.Minute),
-			CapacityWait:      Duration(500 * time.Millisecond),
-			MaxAttempts:       3,
-			RetryStatusCodes:  append([]int(nil), DefaultRetryStatusCodes...),
-			RetryServerErrors: true,
+			StickyTTL:                  Duration(time.Hour),
+			CooldownBase:               Duration(30 * time.Second),
+			CooldownMax:                Duration(30 * time.Minute),
+			CapacityWait:               Duration(500 * time.Millisecond),
+			MaxAttempts:                3,
+			RetryStatusCodes:           append([]int(nil), DefaultRetryStatusCodes...),
+			RetryServerErrors:          true,
+			DeprioritizeFailedAccounts: true,
 			PromptCacheAffinity: PromptCacheAffinityConfig{
 				Enabled:     true,
 				Fingerprint: true,

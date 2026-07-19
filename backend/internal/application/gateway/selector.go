@@ -90,22 +90,23 @@ func (l *accountLease) Release() {
 
 // Selector 实现可替换的 balanced 账号选择策略。
 type Selector struct {
-	accounts       repository.AccountRepository
-	concurrency    repository.ConcurrencyLimiter
-	sticky         repository.StickySessionRepository
-	logger         *slog.Logger
-	stickyTTL      time.Duration
-	cooldownBase   time.Duration
-	cooldownMax    time.Duration
-	capacityWait   time.Duration
-	mu             sync.Mutex
-	leaseWakeMu    sync.Mutex
-	leaseWake      chan struct{}
-	lastSelectedAt map[uint64]time.Time
-	lastSuccessAt  map[uint64]time.Time
-	candidates     map[candidateCacheKey]candidateSnapshot
-	candidateLoads singleflight.Group
-	tierOrders     interface {
+	accounts                   repository.AccountRepository
+	concurrency                repository.ConcurrencyLimiter
+	sticky                     repository.StickySessionRepository
+	logger                     *slog.Logger
+	stickyTTL                  time.Duration
+	cooldownBase               time.Duration
+	cooldownMax                time.Duration
+	capacityWait               time.Duration
+	deprioritizeFailedAccounts bool
+	mu                         sync.Mutex
+	leaseWakeMu                sync.Mutex
+	leaseWake                  chan struct{}
+	lastSelectedAt             map[uint64]time.Time
+	lastSuccessAt              map[uint64]time.Time
+	candidates                 map[candidateCacheKey]candidateSnapshot
+	candidateLoads             singleflight.Group
+	tierOrders                 interface {
 		TierOrder(account.Provider, string) []account.WebTier
 	}
 }
@@ -117,7 +118,13 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, logger: slog.Default(), tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot)}
+	return &Selector{
+		accounts: accounts, concurrency: concurrency, sticky: sticky, logger: slog.Default(),
+		tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax,
+		capacityWait: wait, deprioritizeFailedAccounts: true,
+		leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time),
+		candidates: make(map[candidateCacheKey]candidateSnapshot),
+	}
 }
 
 // SetLogger attaches schedule diagnostics logger (account pick, capacity wait, sticky).
@@ -149,10 +156,29 @@ func (s *Selector) UpdateConfig(stickyTTL, cooldownBase, cooldownMax time.Durati
 	s.mu.Unlock()
 }
 
+// SetDeprioritizeFailedAccounts toggles ranking accounts with higher failure_count last.
+func (s *Selector) SetDeprioritizeFailedAccounts(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.deprioritizeFailedAccounts = enabled
+	s.mu.Unlock()
+}
+
 func (s *Selector) routingConfig() (time.Duration, time.Duration, time.Duration, time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stickyTTL, s.cooldownBase, s.cooldownMax, s.capacityWait
+}
+
+func (s *Selector) deprioritizeFailed() bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deprioritizeFailedAccounts
 }
 
 func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
