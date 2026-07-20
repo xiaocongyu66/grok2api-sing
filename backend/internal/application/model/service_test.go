@@ -13,6 +13,7 @@ import (
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
@@ -126,7 +127,7 @@ func TestListPublicModelsFollowsConfiguredListAndAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 	modelRepo := relational.NewModelRepository(database)
-	// Seed only what admin model list would have — no hardcoded full catalog dump.
+	// Seed catalog + effort aliases as real model_routes (each has its own id for keys).
 	if err := modelRepo.ReplaceProviderRoutes(ctx, account.ProviderConsole, consoleprovider.Routes()); err != nil {
 		t.Fatal(err)
 	}
@@ -139,42 +140,61 @@ func TestListPublicModelsFollowsConfiguredListAndAliases(t *testing.T) {
 	if len(routes) == 0 {
 		t.Fatal("expected configured console routes")
 	}
-	foundXHigh := false
-	for _, name := range aliases {
-		if name == "grok-4.20-multi-agent-xhigh" {
-			foundXHigh = true
+	// Effort shortcuts are real rows (public id) and also listed as aliases.
+	foundXHighRoute := false
+	for _, route := range routes {
+		if modeldomain.ExternalPublicID(route.Provider, route.PublicID) == "grok-4.20-multi-agent-xhigh" {
+			foundXHighRoute = true
+			if route.ID == 0 {
+				t.Fatal("effort alias must have a real route id for client-key ACL")
+			}
 			break
 		}
 	}
-	if !foundXHigh {
+	if !foundXHighRoute {
+		t.Fatalf("routes missing multi-agent-xhigh row: count=%d aliases=%#v", len(routes), aliases)
+	}
+	foundXHighAlias := false
+	for _, name := range aliases {
+		if name == "grok-4.20-multi-agent-xhigh" {
+			foundXHighAlias = true
+			break
+		}
+	}
+	if !foundXHighAlias {
 		t.Fatalf("aliases missing multi-agent-xhigh: %#v", aliases)
 	}
-	// Disable multi-agent route → alias must disappear (follows list content).
-	values, _, err := modelRepo.List(ctx, repository.ModelListQuery{Page: repository.PageQuery{Limit: 100}})
+	// Disable the effort-alias route itself → it must leave the public list.
+	values, _, err := modelRepo.List(ctx, repository.ModelListQuery{Page: repository.PageQuery{Limit: 200}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var multiID uint64
+	var xhighID uint64
 	for _, value := range values {
-		if value.UpstreamModel == "grok-4.20-multi-agent-0309" {
-			multiID = value.ID
+		if modeldomain.ExternalPublicID(value.Provider, value.PublicID) == "grok-4.20-multi-agent-xhigh" {
+			xhighID = value.ID
 			break
 		}
 	}
-	if multiID == 0 {
-		t.Fatal("multi-agent route missing from seeded list")
+	if xhighID == 0 {
+		t.Fatal("multi-agent-xhigh route missing from seeded list")
 	}
 	enabled := false
-	if _, err := service.Update(ctx, multiID, UpdateInput{Enabled: &enabled}); err != nil {
+	if _, err := service.Update(ctx, xhighID, UpdateInput{Enabled: &enabled}); err != nil {
 		t.Fatal(err)
 	}
-	_, aliases, err = service.ListPublicModels(ctx)
+	routes, aliases, err = service.ListPublicModels(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, route := range routes {
+		if modeldomain.ExternalPublicID(route.Provider, route.PublicID) == "grok-4.20-multi-agent-xhigh" {
+			t.Fatal("disabled effort alias must not appear in public routes")
+		}
+	}
 	for _, name := range aliases {
 		if name == "grok-4.20-multi-agent-xhigh" {
-			t.Fatal("alias must not appear when target route is disabled in model list")
+			t.Fatal("disabled effort alias must not reappear via registry aliases")
 		}
 	}
 }

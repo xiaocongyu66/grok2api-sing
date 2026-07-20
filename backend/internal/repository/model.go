@@ -23,6 +23,9 @@ type ModelRepository interface {
 	Get(ctx context.Context, id uint64) (model.Route, error)
 	GetByPublicID(ctx context.Context, publicID string) (model.Route, error)
 	GetByPublicIDCandidates(ctx context.Context, publicID string) ([]model.Route, error)
+	// GetByPublicIDIncludingDisabled resolves a public id even when the route is disabled
+	// (used so disabled effort-alias rows are not re-listed via registry aliases).
+	GetByPublicIDIncludingDisabled(ctx context.Context, publicID string) (model.Route, error)
 	// GetConfiguredPublicIDCandidates returns enabled routes without requiring a ready account.
 	GetConfiguredPublicIDCandidates(ctx context.Context, publicID string) ([]model.Route, error)
 	GetByProviderUpstream(ctx context.Context, provider account.Provider, upstreamModel string) (model.Route, error)

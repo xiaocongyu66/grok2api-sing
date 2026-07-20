@@ -143,14 +143,17 @@ func (s *Service) ListPublicModels(ctx context.Context) ([]modeldomain.Route, []
 	return values, s.aliasesForRoutes(ctx, values), nil
 }
 
-// aliasesForRoutes returns client alias IDs for targets that are currently enabled
-// in model_routes (after startup/sync catalog reseed). Admin-disabled routes hide
-// their effort aliases (e.g. disabling multi-agent-0309 hides multi-agent-xhigh).
-func (s *Service) aliasesForRoutes(_ context.Context, routes []modeldomain.Route) []string {
+// aliasesForRoutes returns client alias IDs for /v1/models.
+// Effort shortcuts may be real model_routes rows (own id for key ACL):
+//   - if the alias public id is already an enabled route, include it (deduped by list)
+//   - if a dedicated route exists but is disabled, do NOT re-surface via registry
+//   - legacy virtual aliases (no dedicated row) still appear when upstream is enabled
+func (s *Service) aliasesForRoutes(ctx context.Context, routes []modeldomain.Route) []string {
 	if s == nil || s.providers == nil {
 		return nil
 	}
 	present := make(map[string]struct{}, len(routes)*2)
+	enabledAlias := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
 		if !route.Enabled {
 			continue
@@ -161,6 +164,7 @@ func (s *Service) aliasesForRoutes(_ context.Context, routes []modeldomain.Route
 		}
 		if ext := modeldomain.ExternalPublicID(route.Provider, route.PublicID); ext != "" {
 			present["ext\x00"+ext] = struct{}{}
+			enabledAlias[ext] = struct{}{}
 		}
 	}
 	aliases := s.providers.ListModelAliases()
@@ -172,6 +176,18 @@ func (s *Service) aliasesForRoutes(_ context.Context, routes []modeldomain.Route
 		name := strings.TrimSpace(alias.Alias)
 		if name == "" {
 			continue
+		}
+		if _, ok := enabledAlias[name]; ok {
+			out = append(out, name)
+			continue
+		}
+		// Dedicated effort row exists but is disabled (or missing from enabled list):
+		// do not resurrect it just because the base upstream is still enabled.
+		if s.models != nil {
+			if dedicated, err := s.models.GetByPublicIDIncludingDisabled(ctx, name); err == nil {
+				_ = dedicated
+				continue
+			}
 		}
 		upstream := strings.TrimSpace(alias.UpstreamModel)
 		key := string(alias.Provider) + "\x00" + upstream
