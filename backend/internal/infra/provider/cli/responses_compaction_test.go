@@ -322,7 +322,8 @@ data: {"type":"error","code":"503","message":"temporarily unavailable"}
 	}
 }
 
-func TestCompactionPostProcessingFailureDoesNotRetryAnotherAccount(t *testing.T) {
+func TestCompactionWithoutCodecStillReturnsTextOnlySummary(t *testing.T) {
+	// Compact responses no longer need the g2a_compact encoder; codec may be nil.
 	adapter, encrypted := newCompactionTestAdapter(t)
 	adapter.compaction = nil
 	adapter.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -333,8 +334,12 @@ func TestCompactionPostProcessingFailureDoesNotRetryAnotherAccount(t *testing.T)
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusBadGateway || response.Header.Get("X-Should-Retry") != "false" {
-		t.Fatalf("status = %d, headers = %#v", response.StatusCode, response.Header)
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || strings.Contains(string(data), `"type":"compaction"`) || !strings.Contains(string(data), `"type":"message"`) {
+		t.Fatalf("status = %d body = %s headers = %#v", response.StatusCode, data, response.Header)
 	}
 }
 
