@@ -98,6 +98,7 @@ export function SettingsPage() {
               <SettingsField controlId="provider-client-identifier" label={t("settings.provider.clientIdentifier")} error={form.formState.errors.providerBuild?.clientIdentifier?.message}><Input id="provider-client-identifier" {...form.register("providerBuild.clientIdentifier")} /></SettingsField>
               <SettingsField controlId="provider-token-auth" label={t("settings.provider.tokenAuth")} badge={form.watch("providerBuild.tokenAuthConfigured") ? t("settings.web.statsigConfigured") : undefined} error={form.formState.errors.providerBuild?.tokenAuth?.message}><Input id="provider-token-auth" type="password" autoComplete="off" placeholder={form.watch("providerBuild.tokenAuthConfigured") ? t("settings.web.statsigKeepConfigured") : undefined} {...form.register("providerBuild.tokenAuth")} /></SettingsField>
               <SettingsField controlId="provider-user-agent" label={t("settings.provider.userAgent")} error={form.formState.errors.providerBuild?.userAgent?.message}><Input id="provider-user-agent" {...form.register("providerBuild.userAgent")} /></SettingsField>
+              <SettingsField controlId="provider-response-header-timeout" label={t("settings.provider.responseHeaderTimeout")} error={form.formState.errors.providerBuild?.responseHeaderTimeout?.message}><Input id="provider-response-header-timeout" placeholder="5m" {...form.register("providerBuild.responseHeaderTimeout")} /></SettingsField>
             </div>
           </SettingsSection>
 

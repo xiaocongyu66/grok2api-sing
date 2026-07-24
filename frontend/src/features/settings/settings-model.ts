@@ -39,6 +39,11 @@ export const settingsSchema = z.object({
     tokenAuth: z.string().trim(),
     tokenAuthConfigured: z.boolean(),
     userAgent: z.string().trim().min(1),
+    // 30s .. 30m, matches backend Min/MaxBuildResponseHeaderTimeout
+    responseHeaderTimeout: durationSchema.refine((value) => {
+      const seconds = durationSeconds(value);
+      return seconds >= 30 && seconds <= 30 * 60;
+    }, { message: "30s..30m" }),
   }).superRefine((value, context) => {
     if (!value.tokenAuthConfigured && value.tokenAuth.length === 0) {
       context.addIssue({ code: "custom", path: ["tokenAuth"], message: "required" });

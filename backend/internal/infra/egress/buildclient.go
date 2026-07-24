@@ -8,13 +8,18 @@ import (
 	"strings"
 	"time"
 
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	xproxy "golang.org/x/net/proxy"
 )
 
 // newBuildClient keeps Grok Build on the standard Go HTTP/TLS stack used by
 // the official CLI-facing transport. When a proxy URL is set, dials go through
 // an in-process sing-box outbound (no extra process, no local mixed inbound).
-func newBuildClient(proxyURL string) (requestClient, error) {
+// responseHeaderTimeout bounds wait for first response headers (not body).
+func newBuildClient(proxyURL string, responseHeaderTimeout time.Duration) (requestClient, error) {
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
+	}
 	transport := &http.Transport{
 		Proxy:                 nil,
 		ForceAttemptHTTP2:     true,
@@ -23,7 +28,7 @@ func newBuildClient(proxyURL string) (requestClient, error) {
 		MaxConnsPerHost:       256,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
 		ExpectContinueTimeout: time.Second,
 	}
 	if strings.TrimSpace(proxyURL) == "" {

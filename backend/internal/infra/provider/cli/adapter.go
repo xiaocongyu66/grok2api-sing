@@ -16,11 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider/conversation"
@@ -29,12 +31,13 @@ import (
 )
 
 type Config struct {
-	BaseURL          string
-	FallbackBaseURL  string
-	ClientVersion    string
-	ClientIdentifier string
-	TokenAuth        string
-	UserAgent        string
+	BaseURL               string
+	FallbackBaseURL       string
+	ClientVersion         string
+	ClientIdentifier      string
+	TokenAuth             string
+	UserAgent             string
+	ResponseHeaderTimeout time.Duration
 }
 
 // Adapter 实现 Grok Build CLI Responses、模型、Billing 与 OAuth 协议。
@@ -44,7 +47,7 @@ type Adapter struct {
 	http           *http.Client
 	oauth          *oauthClient
 	cipher         *security.Cipher
-	base           http.RoundTripper
+	base           *buildDirectTransport
 	agentID        string
 	modelsMu       sync.Mutex
 	modelsETags    map[uint64]string
@@ -56,7 +59,8 @@ type Adapter struct {
 }
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true, MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
+	cfg.ResponseHeaderTimeout = normalizeBuildResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
+	transport := newBuildDirectTransport(cfg.ResponseHeaderTimeout)
 	httpClient := &http.Client{Transport: transport}
 	// 官方 CLI 使用持久化机器身份。网关不采集机器指纹，改为每个后端
 	// 进程生成一个随机 UUID，在进程生命周期内作为统一 Agent 身份。
@@ -102,9 +106,53 @@ func isCompactPath(path string) bool {
 }
 
 func (a *Adapter) UpdateConfig(cfg Config) {
+	cfg.ResponseHeaderTimeout = normalizeBuildResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
 	a.cfgMu.Lock()
+	previousTimeout := a.cfg.ResponseHeaderTimeout
 	a.cfg = cfg
 	a.cfgMu.Unlock()
+	if previousTimeout != cfg.ResponseHeaderTimeout && a.base != nil {
+		a.base.UpdateResponseHeaderTimeout(cfg.ResponseHeaderTimeout)
+	}
+}
+
+type buildDirectTransport struct {
+	current atomic.Pointer[http.Transport]
+}
+
+func newBuildDirectTransport(responseHeaderTimeout time.Duration) *buildDirectTransport {
+	value := &buildDirectTransport{}
+	value.current.Store(newBuildHTTPTransport(responseHeaderTimeout))
+	return value
+}
+
+func (t *buildDirectTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return t.current.Load().RoundTrip(request)
+}
+
+func (t *buildDirectTransport) UpdateResponseHeaderTimeout(responseHeaderTimeout time.Duration) {
+	next := newBuildHTTPTransport(responseHeaderTimeout)
+	previous := t.current.Swap(next)
+	if previous != nil {
+		previous.CloseIdleConnections()
+	}
+}
+
+func newBuildHTTPTransport(responseHeaderTimeout time.Duration) *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment, ForceAttemptHTTP2: true,
+		MaxIdleConns: 256, MaxIdleConnsPerHost: 128, MaxConnsPerHost: 256,
+		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
+		ResponseHeaderTimeout: normalizeBuildResponseHeaderTimeout(responseHeaderTimeout),
+		ExpectContinueTimeout: time.Second,
+	}
+}
+
+func normalizeBuildResponseHeaderTimeout(value time.Duration) time.Duration {
+	if value <= 0 {
+		return settingsdomain.DefaultBuildResponseHeaderTimeout
+	}
+	return value
 }
 
 func (a *Adapter) config() Config {

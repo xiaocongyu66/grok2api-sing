@@ -62,12 +62,13 @@ type mediaConfigDTO struct {
 }
 
 type providerBuildConfigDTO struct {
-	BaseURL             string `json:"baseURL"`
-	ClientVersion       string `json:"clientVersion"`
-	ClientIdentifier    string `json:"clientIdentifier"`
-	TokenAuth           string `json:"tokenAuth"`
-	TokenAuthConfigured bool   `json:"tokenAuthConfigured"`
-	UserAgent           string `json:"userAgent"`
+	BaseURL               string `json:"baseURL"`
+	ClientVersion         string `json:"clientVersion"`
+	ClientIdentifier      string `json:"clientIdentifier"`
+	TokenAuth             string `json:"tokenAuth"`
+	TokenAuthConfigured   bool   `json:"tokenAuthConfigured"`
+	UserAgent             string `json:"userAgent"`
+	ResponseHeaderTimeout string `json:"responseHeaderTimeout"`
 }
 
 type providerWebConfigDTO struct {
@@ -178,6 +179,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			BaseURL: value.ProviderBuild.BaseURL, ClientVersion: value.ProviderBuild.ClientVersion,
 			ClientIdentifier: value.ProviderBuild.ClientIdentifier, TokenAuth: value.ProviderBuild.TokenAuth,
 			UserAgent: value.ProviderBuild.UserAgent,
+			ResponseHeaderTimeout: value.ProviderBuild.ResponseHeaderTimeout,
 		},
 		ProviderWeb: settingsapp.ProviderWebConfig{
 			BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: value.ProviderWeb.QuotaTimeout,
@@ -257,6 +259,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				BaseURL: config.ProviderBuild.BaseURL, ClientVersion: config.ProviderBuild.ClientVersion,
 				ClientIdentifier: config.ProviderBuild.ClientIdentifier, TokenAuthConfigured: strings.TrimSpace(config.ProviderBuild.TokenAuth) != "",
 				UserAgent: config.ProviderBuild.UserAgent,
+				ResponseHeaderTimeout: config.ProviderBuild.ResponseHeaderTimeout,
 			},
 			ProviderWeb: providerWebConfigDTO{
 				BaseURL: config.ProviderWeb.BaseURL, QuotaTimeout: config.ProviderWeb.QuotaTimeout,

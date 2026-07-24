@@ -12,12 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	application "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
+	"github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
 )
@@ -112,6 +115,7 @@ type Manager struct {
 	nodeLoads            singleflight.Group
 	stats                map[uint64]*nodeRuntimeStats
 	probeURL             string
+	buildHeaderTimeout   atomic.Int64
 	operationsMu         sync.RWMutex
 	operationsConfig     cachedOperationsConfig
 	operationsConfigLoad singleflight.Group
@@ -145,7 +149,7 @@ type cachedNodeSnapshot struct {
 }
 
 func NewManager(repository repository.EgressRepository, cipher *security.Cipher) *Manager {
-	return &Manager{
+	manager := &Manager{
 		repository: repository,
 		cipher:     cipher,
 		logger:     slog.Default(),
@@ -154,6 +158,37 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 		stats:      make(map[uint64]*nodeRuntimeStats),
 		nodes:      make(map[domain.Scope]cachedNodeSnapshot),
 		probeURL:   defaultProbeURL,
+	}
+	manager.buildHeaderTimeout.Store(int64(settingsdomain.DefaultBuildResponseHeaderTimeout))
+	return manager
+}
+
+// UpdateBuildResponseHeaderTimeout rebuilds only cached Build clients.
+// Active requests keep their current transport and are not interrupted.
+func (m *Manager) UpdateBuildResponseHeaderTimeout(value time.Duration) {
+	if m == nil {
+		return
+	}
+	if value <= 0 {
+		value = settingsdomain.DefaultBuildResponseHeaderTimeout
+	}
+	if previous := time.Duration(m.buildHeaderTimeout.Swap(int64(value))); previous == value {
+		return
+	}
+	m.mu.Lock()
+	var stale []requestClient
+	for key, cached := range m.clients {
+		if key.scope != domain.ScopeBuild {
+			continue
+		}
+		if cached.client != nil {
+			stale = append(stale, cached.client)
+		}
+		delete(m.clients, key)
+	}
+	m.mu.Unlock()
+	for _, client := range stale {
+		client.CloseIdleConnections()
 	}
 }
 
@@ -690,8 +725,14 @@ func (m *Manager) selectNode(nodes []domain.Node, affinity string) domain.Node {
 
 func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, cookies string, sticky bool) (cachedClient, error) {
 	clientKind := "browser"
+	buildHeaderTimeout := time.Duration(0)
 	if scope == domain.ScopeBuild {
 		clientKind = "build"
+		buildHeaderTimeout = time.Duration(m.buildHeaderTimeout.Load())
+		if buildHeaderTimeout <= 0 {
+			buildHeaderTimeout = settingsdomain.DefaultBuildResponseHeaderTimeout
+		}
+		clientKind += "\x00" + strconv.FormatInt(int64(buildHeaderTimeout), 10)
 	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(clientKind+"\x00"+proxyURL+"\x00"+userAgent+"\x00"+cookies)))
 	cacheScope := scope
@@ -706,7 +747,7 @@ func (m *Manager) clientFor(id uint64, scope domain.Scope, proxyURL, userAgent, 
 	}
 	var value cachedClient
 	if scope == domain.ScopeBuild {
-		client, err := newBuildClient(proxyURL)
+		client, err := newBuildClient(proxyURL, buildHeaderTimeout)
 		if err != nil {
 			return cachedClient{}, err
 		}
@@ -742,6 +783,10 @@ func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, trans
 }
 
 func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
+	// Build header timeouts are request-path configuration, not egress health.
+	if scope == domain.ScopeBuild && neterror.IsResponseHeaderTimeout(transportErr) {
+		return
+	}
 	if nodeID == 0 {
 		if transportErr != nil || status >= 500 || (scope != domain.ScopeBuild && status == http.StatusForbidden) {
 			m.mu.Lock()
@@ -996,7 +1041,11 @@ func (m *Manager) probeNode(ctx context.Context, value domain.Node) (domain.Prob
 		return result, nil
 	}
 	result.ProxyUsed = proxyURL != ""
-	client, err := newBuildClient(proxyURL)
+	timeout := time.Duration(m.buildHeaderTimeout.Load())
+	if timeout <= 0 {
+		timeout = settingsdomain.DefaultBuildResponseHeaderTimeout
+	}
+	client, err := newBuildClient(proxyURL, timeout)
 	if err != nil {
 		result.Error = err.Error()
 		m.recordProbe(value.ID, false, 0, result.Error)

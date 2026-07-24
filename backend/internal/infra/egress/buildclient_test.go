@@ -27,7 +27,7 @@ func TestNewBuildClientUsesSingBoxDialerForEveryProxyFamily(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client, err := newBuildClient(test.proxyURL)
+			client, err := newBuildClient(test.proxyURL, 5*time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -45,7 +45,7 @@ func TestNewBuildClientUsesSingBoxDialerForEveryProxyFamily(t *testing.T) {
 }
 
 func TestNewBuildClientRejectsUnsupportedProxyScheme(t *testing.T) {
-	if _, err := newBuildClient("ftp://proxy.example:21"); err == nil {
+	if _, err := newBuildClient("ftp://proxy.example:21", 5*time.Minute); err == nil {
 		t.Fatal("unsupported proxy scheme was accepted")
 	}
 }
@@ -73,7 +73,7 @@ func TestBuildClientRoutesThroughSOCKS5HWithRemoteDNS(t *testing.T) {
 	proxyDone := make(chan error, 1)
 	go func() { proxyDone <- serveSOCKS5TunnelOnce(listener, upstreamAddress, requestedHost) }()
 
-	client, err := newBuildClient("socks5h://" + listener.Addr().String())
+	client, err := newBuildClient("socks5h://"+listener.Addr().String(), 5*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,4 +224,16 @@ func readSOCKS5Host(reader io.Reader, addressType byte) (string, error) {
 
 func isClosedNetworkError(err error) bool {
 	return err == nil || strings.Contains(strings.ToLower(err.Error()), "closed network connection")
+}
+
+func TestBuildClientUsesConfiguredResponseHeaderTimeout(t *testing.T) {
+	client, err := newBuildClient("", 7*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	transport := clientTransport(t, client)
+	if transport.ResponseHeaderTimeout != 7*time.Minute {
+		t.Fatalf("response header timeout = %s", transport.ResponseHeaderTimeout)
+	}
 }
