@@ -61,11 +61,13 @@ func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
 	// 官方 CLI 使用持久化机器身份。网关不采集机器指纹，改为每个后端
 	// 进程生成一个随机 UUID，在进程生命周期内作为统一 Agent 身份。
 	agentID := uuid.NewString()
-	return &Adapter{
-		cfg: cfg, http: httpClient, oauth: newOAuthClient(httpClient), cipher: cipher, base: transport,
+	adapter := &Adapter{
+		cfg: cfg, http: httpClient, cipher: cipher, base: transport,
 		agentID: agentID, modelsETags: make(map[uint64]string),
 		compaction: newGatewayCompactionCodec(cipher), compactRecall: newGatewayCompactRecall(),
 	}
+	adapter.oauth = newOAuthClient(httpClient, func() string { return adapter.config().ClientVersion })
+	return adapter
 }
 
 func (a *Adapter) SetEgress(manager *infraegress.Manager) {
@@ -150,6 +152,13 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				compactionRequested = toolCompatibility.compactionRequested
 			}
 		}
+		if err != nil {
+			if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
+				return invalidConversationResponse(request.Operation, err), nil
+			}
+			return invalidResponsesResponse(err), nil
+		}
+		body, err = normalizeBuildReasoningEffort(body)
 		if err != nil {
 			if request.Operation == conversation.OperationChat || request.Operation == conversation.OperationMessages {
 				return invalidConversationResponse(request.Operation, err), nil

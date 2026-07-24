@@ -41,7 +41,6 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/promptcache"
 	"github.com/chenyme/grok2api/backend/internal/pkg/reasoningreplay"
-	"github.com/chenyme/grok2api/backend/internal/pkg/toolslimit"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	httpserver "github.com/chenyme/grok2api/backend/internal/transport/http"
 	httpmiddleware "github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
@@ -648,14 +647,6 @@ func (a *Application) Run(ctx context.Context) error {
 	startBackground("media_cleanup", func(taskCtx context.Context) error {
 		a.media.RunCleanup(taskCtx, func(err error) {
 			a.logger.Warn("media_cleanup_failed", "error", err)
-		})
-		return nil
-	})
-	// Dynamic tools ceiling: every 5m sample a recent tools-count and lower the
-	// effective limit (≤ hard max 250) so oversized agent payloads fail fast.
-	startBackground("tools_limit", func(taskCtx context.Context) error {
-		toolslimit.Run(taskCtx, func(msg string, kv ...any) {
-			a.logger.Info(msg, kv...)
 		})
 		return nil
 	})

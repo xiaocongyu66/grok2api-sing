@@ -36,7 +36,7 @@ func TestOAuthRefreshClassifiesPermanentAndTransientFailures(t *testing.T) {
 				}
 				return &http.Response{StatusCode: test.status, Header: header, Body: io.NopCloser(strings.NewReader(test.body)), Request: request}, nil
 			})}
-			client := newOAuthClient(httpClient)
+			client := newOAuthClient(httpClient, nil)
 			client.tokenURL = "https://auth.x.ai/oauth2/token"
 			_, err := client.refresh(context.Background(), "refresh")
 			var refreshErr *provider.CredentialRefreshError

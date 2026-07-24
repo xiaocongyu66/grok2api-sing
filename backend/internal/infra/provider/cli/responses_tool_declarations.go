@@ -71,7 +71,7 @@ func normalizeResponsesTools(payload map[string]json.RawMessage) (*responsesTool
 		toolslimit.Observe(len(normalizedTools))
 		if err := toolslimit.Check(len(normalizedTools)); err != nil {
 			return nil, &responsesRequestError{
-				Message: fmt.Sprintf("tools 规范化后数量超过动态上限：%d 个（含 namespace 展开）；%s", len(normalizedTools), err.Error()),
+				Message: fmt.Sprintf("tools 规范化后数量超过上限：%d 个（含 namespace 展开）；%s", len(normalizedTools), err.Error()),
 				Param:   "tools",
 				Code:    "invalid_parameter",
 			}

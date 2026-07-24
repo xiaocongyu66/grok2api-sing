@@ -1,58 +1,31 @@
 package toolslimit
 
 import (
-	"math/rand"
+	"strings"
 	"testing"
 )
 
-func TestCheckRespectsDynamicLimit(t *testing.T) {
-	ResetForTest()
-	defer ResetForTest()
-
+func TestCheckHardMax(t *testing.T) {
+	if Current() != HardMax {
+		t.Fatalf("Current()=%d want %d", Current(), HardMax)
+	}
 	if err := Check(100); err != nil {
 		t.Fatalf("under hard max: %v", err)
 	}
-	if err := Check(251); err == nil {
-		t.Fatal("expected hard rejection above 250")
+	if err := Check(HardMax); err != nil {
+		t.Fatalf("at hard max: %v", err)
 	}
-
-	// Feed small samples and recompute → limit drops.
-	for i := 0; i < 10; i++ {
-		Observe(40)
+	if err := Check(HardMax + 1); err == nil {
+		t.Fatal("expected rejection above hard max")
+	} else if !strings.Contains(err.Error(), "250") {
+		t.Fatalf("error should mention hard max, got %v", err)
 	}
-	rng := rand.New(rand.NewSource(1))
-	picked, next, ok := RecomputeOnce(rng)
-	if !ok || picked != 40 {
-		t.Fatalf("picked=%d next=%d ok=%v", picked, next, ok)
-	}
-	want := 40 + headroom
-	if next != want {
-		t.Fatalf("next=%d want %d", next, want)
-	}
-	if err := Check(want); err != nil {
-		t.Fatalf("at dynamic limit: %v", err)
-	}
-	if err := Check(want + 1); err == nil {
-		t.Fatal("expected rejection above dynamic limit")
-	}
-}
-
-func TestRecomputeClampsToHardMax(t *testing.T) {
-	ResetForTest()
-	defer ResetForTest()
-	Observe(250)
-	_, next, ok := RecomputeOnce(rand.New(rand.NewSource(2)))
-	if !ok || next != HardMax {
-		t.Fatalf("next=%d ok=%v", next, ok)
-	}
-}
-
-func TestRecomputeFloor(t *testing.T) {
-	ResetForTest()
-	defer ResetForTest()
+	// Observe is a no-op and must not change the limit.
 	Observe(1)
-	_, next, ok := RecomputeOnce(rand.New(rand.NewSource(3)))
-	if !ok || next != MinFloor {
-		t.Fatalf("next=%d want floor %d", next, MinFloor)
+	if Current() != HardMax {
+		t.Fatalf("after Observe Current()=%d want %d", Current(), HardMax)
+	}
+	if err := Check(74); err != nil {
+		t.Fatalf("74 tools must pass fixed HardMax: %v", err)
 	}
 }
