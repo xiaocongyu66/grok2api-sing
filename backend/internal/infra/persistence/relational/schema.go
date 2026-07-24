@@ -34,6 +34,7 @@ var schemaModels = []any{
 	&runtimeSettingsModel{},
 		&promptCacheAffinityModel{},
 	&egressNodeModel{},
+	&egressOperationsConfigModel{},
 }
 
 var schemaIndexes = []string{

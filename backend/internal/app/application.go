@@ -317,6 +317,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	selector := gateway.NewSelector(accountRepo, concurrency, sticky, providers, cfg.Routing.StickyTTL.Value(), cfg.Routing.CooldownBase.Value(), cfg.Routing.CooldownMax.Value(), cfg.Routing.CapacityWait.Value())
 	selector.SetLogger(logger)
 	selector.SetDeprioritizeFailedAccounts(cfg.Routing.DeprioritizeFailedAccounts)
+	selector.UpdatePreferFreeBuild(cfg.Routing.PreferFreeBuild)
+	selector.UpdateSegmentedSelector(cfg.Routing.SegmentedSelectorEnabled, cfg.Routing.SegmentedMinCandidates, cfg.Routing.SegmentedWindowSize)
 	accountService.SetPoolNotify(selector.InvalidateProvider)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
 	gatewayService.SetLogger(logger)
@@ -381,6 +383,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		}
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		selector.SetDeprioritizeFailedAccounts(next.Routing.DeprioritizeFailedAccounts)
+		selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
+		selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{
 			Enabled: next.Routing.ReasoningReplayEnabled,
 			TTL:     next.Routing.ReasoningReplayTTL.Value(),

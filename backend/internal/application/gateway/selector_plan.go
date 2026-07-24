@@ -4,7 +4,6 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -12,13 +11,14 @@ import (
 )
 
 type candidateScore struct {
-	index        int
-	tier         int
-	billingFresh bool
-	failureCount int
-	inFlight     int
-	remaining    float64
-	lastSelected time.Time
+	index           int
+	tier            int
+	preferFreeBuild bool
+	billingFresh    bool
+	failureCount    int
+	inFlight        int
+	remaining       float64
+	lastSelected    time.Time
 }
 
 // candidatePlan 使用线性建堆保留完整路由优先级，并允许 claim 失败后按顺序取下一账号。
@@ -65,6 +65,9 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 	if leftCandidate.ModelCapabilityKnown != rightCandidate.ModelCapabilityKnown {
 		return leftCandidate.ModelCapabilityKnown
 	}
+	if leftScore.preferFreeBuild != rightScore.preferFreeBuild {
+		return leftScore.preferFreeBuild
+	}
 	if leftScore.tier != rightScore.tier {
 		return leftScore.tier < rightScore.tier
 	}
@@ -92,45 +95,86 @@ func candidateScoreBetter(values []account.RoutingCandidate, leftScore, rightSco
 
 // planCandidates 批量读取动态并发状态，并以 O(n) 建堆生成保持原比较规则的候选计划。
 func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingCandidate, now time.Time, tierOrder []account.WebTier) (*candidatePlan, error) {
-	keys := make([]string, len(values))
-	for index, candidate := range values {
-		keys[index] = accountConcurrencyKey(candidate.Credential.ID)
+	return s.planCandidateIndexes(ctx, values, nil, now, tierOrder)
+}
+
+// planCandidateIndexes plans over immutable snapshot indexes (nil = all values).
+func (s *Selector) planCandidateIndexes(ctx context.Context, values []account.RoutingCandidate, indexes []int, now time.Time, tierOrder []account.WebTier) (*candidatePlan, error) {
+	return s.planCandidateIndexesWithHints(ctx, values, indexes, now, tierOrder, nil, s.preferFreeBuildEnabled())
+}
+
+func (s *Selector) planCandidateIndexesWithHints(ctx context.Context, values []account.RoutingCandidate, indexes []int, now time.Time, tierOrder []account.WebTier, concurrencyHints []int, preferFreeBuild bool) (*candidatePlan, error) {
+	length := len(indexes)
+	if indexes == nil {
+		length = len(values)
 	}
-	var concurrencySnapshot map[string]int
-	batchReader, batched := s.concurrency.(repository.ConcurrencySnapshotReader)
-	if batched {
-		var err error
-		concurrencySnapshot, err = batchReader.CurrentMany(ctx, keys)
+	inFlight := make([]int, length)
+	if concurrencyHints == nil {
+		keys := make([]string, length)
+		for position := range length {
+			index := position
+			if indexes != nil {
+				index = indexes[position]
+			}
+			keys[position] = accountConcurrencyKey(values[index].Credential.ID)
+		}
+		concurrencySnapshot, err := s.loadConcurrencySnapshot(ctx, keys)
 		if err != nil {
-			return nil, fmt.Errorf("批量读取账号并发租约: %w", err)
+			return nil, err
 		}
-	}
-	inFlight := make([]int, len(values))
-	for index := range values {
-		if batched {
-			inFlight[index] = concurrencySnapshot[keys[index]]
-			continue
+		for position := range length {
+			inFlight[position] = concurrencySnapshot[keys[position]]
 		}
-		current, err := s.concurrency.Current(ctx, keys[index])
-		if err != nil {
-			return nil, fmt.Errorf("读取账号并发租约: %w", err)
+	} else {
+		missingIndexes := make([]int, 0, length)
+		keys := make([]string, 0, length)
+		for position := range length {
+			index := position
+			if indexes != nil {
+				index = indexes[position]
+			}
+			if concurrencyHints[index] != 0 {
+				continue
+			}
+			missingIndexes = append(missingIndexes, index)
+			keys = append(keys, accountConcurrencyKey(values[index].Credential.ID))
 		}
-		inFlight[index] = current
+		if len(keys) > 0 {
+			concurrencySnapshot, err := s.loadConcurrencySnapshot(ctx, keys)
+			if err != nil {
+				return nil, err
+			}
+			for position, index := range missingIndexes {
+				concurrencyHints[index] = concurrencySnapshot[keys[position]] + 1
+			}
+		}
+		for position := range length {
+			index := position
+			if indexes != nil {
+				index = indexes[position]
+			}
+			inFlight[position] = concurrencyHints[index] - 1
+		}
 	}
 
 	s.mu.Lock()
 	deprioritizeFailed := s.deprioritizeFailedAccounts
-	scores := make([]candidateScore, len(values))
-	for index, candidate := range values {
+	scores := make([]candidateScore, length)
+	for position := range length {
+		index := position
+		if indexes != nil {
+			index = indexes[position]
+		}
+		candidate := values[index]
 		score := candidateScore{
 			index: index, tier: tierOrderRank(tierOrder, candidate.Credential.WebTier),
-			inFlight: inFlight[index], lastSelected: s.lastSelectedAt[candidate.Credential.ID],
+			preferFreeBuild: preferFreeBuild && candidate.IsKnownFreeBuild(),
+			inFlight:        inFlight[position], lastSelected: s.lastSelectedAt[candidate.Credential.ID],
 		}
 		if deprioritizeFailed {
 			score.failureCount = candidate.Credential.FailureCount
 		}
-		// Prefer accounts with more local window quota (Web mode / Console). Billing
-		// remaining is only meaningful for Build paid accounts and is used as fallback.
+		// Prefer accounts with more local window quota (Web/Console); Billing remaining for Build.
 		if candidate.QuotaWindow != nil {
 			score.remaining = float64(candidate.QuotaWindow.Remaining)
 			if candidate.QuotaWindow.SyncedAt != nil {
@@ -142,7 +186,7 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 			score.remaining = candidate.Billing.Remaining()
 			score.billingFresh = now.Sub(candidate.Billing.SyncedAt) <= 30*time.Minute
 		}
-		scores[index] = score
+		scores[position] = score
 	}
 	s.mu.Unlock()
 
@@ -151,6 +195,26 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 	return plan, nil
 }
 
+func (s *Selector) loadConcurrencySnapshot(ctx context.Context, keys []string) (map[string]int, error) {
+	values := make(map[string]int, len(keys))
+	if batchReader, ok := s.concurrency.(repository.ConcurrencySnapshotReader); ok {
+		var err error
+		values, err = batchReader.CurrentMany(ctx, keys)
+		if err != nil {
+			return nil, fmt.Errorf("批量读取账号并发租约: %w", err)
+		}
+		return values, nil
+	}
+	for _, key := range keys {
+		current, err := s.concurrency.Current(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("读取账号并发租约: %w", err)
+		}
+		values[key] = current
+	}
+	return values, nil
+}
+
 func accountConcurrencyKey(accountID uint64) string {
-	return "account:" + strconv.FormatUint(accountID, 10)
+	return repository.AccountConcurrencyKey(accountID)
 }

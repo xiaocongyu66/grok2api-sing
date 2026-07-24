@@ -99,17 +99,33 @@ type nodeRuntimeStats struct {
 	probed         bool
 }
 
+const operationsConfigSnapshotTTL = 5 * time.Second
+
 type Manager struct {
-	repository repository.EgressRepository
-	cipher     *security.Cipher
-	logger     *slog.Logger
-	mu         sync.Mutex
-	clients    map[clientCacheKey]cachedClient
-	inflight   map[uint64]int
-	nodes      map[domain.Scope]cachedNodeSnapshot
-	nodeLoads  singleflight.Group
-	stats      map[uint64]*nodeRuntimeStats
-	probeURL   string
+	repository           repository.EgressRepository
+	cipher               *security.Cipher
+	logger               *slog.Logger
+	mu                   sync.Mutex
+	clients              map[clientCacheKey]cachedClient
+	inflight             map[uint64]int
+	nodes                map[domain.Scope]cachedNodeSnapshot
+	nodeLoads            singleflight.Group
+	stats                map[uint64]*nodeRuntimeStats
+	probeURL             string
+	operationsMu         sync.RWMutex
+	operationsConfig     cachedOperationsConfig
+	operationsConfigLoad singleflight.Group
+	operationsConfigVer  uint64
+}
+
+// operationsConfigRepository is optional so lightweight repos keep a narrow contract.
+type operationsConfigRepository interface {
+	GetEgressOperationsConfig(context.Context) (domain.OperationsConfig, error)
+}
+
+type cachedOperationsConfig struct {
+	value     domain.OperationsConfig
+	expiresAt time.Time
 }
 
 type cachedClient struct {
@@ -139,6 +155,17 @@ func NewManager(repository repository.EgressRepository, cipher *security.Cipher)
 		nodes:      make(map[domain.Scope]cachedNodeSnapshot),
 		probeURL:   defaultProbeURL,
 	}
+}
+
+// InvalidateOperationsConfig drops the cached fallback policy so the next acquire reloads it.
+func (m *Manager) InvalidateOperationsConfig() {
+	if m == nil {
+		return
+	}
+	m.operationsMu.Lock()
+	m.operationsConfig = cachedOperationsConfig{}
+	m.operationsConfigVer++
+	m.operationsMu.Unlock()
 }
 
 // SetLogger attaches a structured logger for egress selection diagnostics.
@@ -195,6 +222,18 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	configured := false
 	var available []domain.Node
 	var cooling []domain.Node
+	fallbackConfig, fallbackSupported, fallbackConfigErr := m.loadOperationsConfig(ctx, now)
+	fallback := domain.FallbackConfig{Mode: domain.FallbackModeNone}
+	reservedFallbackNodes := make(map[uint64]struct{}, 4)
+	if fallbackConfigErr == nil && fallbackSupported {
+		fallback = fallbackConfig.FallbackFor(scope)
+		for _, fallbackScope := range []domain.Scope{domain.ScopeBuild, domain.ScopeWeb, domain.ScopeConsole, domain.ScopeWebAsset} {
+			configuredFallback := fallbackConfig.FallbackFor(fallbackScope)
+			if configuredFallback.Mode == domain.FallbackModeFixed && configuredFallback.NodeID != 0 {
+				reservedFallbackNodes[configuredFallback.NodeID] = struct{}{}
+			}
+		}
+	}
 	for _, candidateScope := range fallbackScopes(scope) {
 		nodes, err := m.listNodes(ctx, candidateScope, now)
 		if err != nil {
@@ -205,6 +244,10 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 		candidateCooling := make([]domain.Node, 0, len(nodes))
 		for _, node := range nodes {
 			if !node.Enabled {
+				continue
+			}
+			// Fixed fallback nodes are last-resort only; exclude from primary pool.
+			if _, reserved := reservedFallbackNodes[node.ID]; reserved {
 				continue
 			}
 			if node.CooldownUntil == nil || !now.Before(*node.CooldownUntil) {
@@ -224,14 +267,27 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 	}
 	if len(available) == 0 {
 		if configured {
-			// Hard-fail only when every configured node is disabled. Cooling is temporary:
-			// prefer the least-bad proxy over a full outage (HF: all grok_build nodes cooling → 502).
-			// Never fall back to direct while proxies are configured (anti-bot / geo policy).
+			// Prefer cooling proxies over configured-pool outage, then configured fallback modes.
 			if len(cooling) == 0 {
-				return nil, false, fmt.Errorf("当前没有可用的 %s 出口节点", scope)
+				primaryErr := fmt.Errorf("当前没有可用的 %s 出口节点", scope)
+				lease, fallbackConfigured, applied, err := m.applyFallback(ctx, scope, affinity, allowDirect, credentialCookies, primaryErr, fallback, fallbackSupported, fallbackConfigErr)
+				if err != nil {
+					return nil, fallbackConfigured, err
+				}
+				if applied {
+					return lease, fallbackConfigured, nil
+				}
+				return nil, false, primaryErr
 			}
 			available = cooling
 		} else {
+			lease, fallbackConfigured, applied, err := m.applyFallback(ctx, scope, affinity, allowDirect, credentialCookies, nil, fallback, fallbackSupported, fallbackConfigErr)
+			if err != nil {
+				return nil, fallbackConfigured, err
+			}
+			if applied {
+				return lease, fallbackConfigured, nil
+			}
 			if !allowDirect {
 				recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
 				return nil, false, nil
@@ -340,6 +396,181 @@ func normalizeProxyAccount(value string) string {
 	}
 	digest := sha256.Sum256([]byte(value))
 	return value[:95] + "_" + fmt.Sprintf("%x", digest[:16])
+}
+
+func (m *Manager) applyFallback(ctx context.Context, scope domain.Scope, affinity string, allowDirect bool, credentialCookies string, primaryErr error, fallback domain.FallbackConfig, supported bool, configErr error) (*Lease, bool, bool, error) {
+	if configErr != nil {
+		return nil, false, false, fallbackError(primaryErr, fmt.Errorf("读取出口回退配置: %w", configErr))
+	}
+	if !supported {
+		return nil, false, false, nil
+	}
+	switch fallback.Mode {
+	case domain.FallbackModeNone:
+		return nil, false, false, nil
+	case domain.FallbackModeDirect:
+		if !allowDirect {
+			recordSelection(ctx, Selection{NodeName: "direct", Scope: scope})
+			return nil, false, true, nil
+		}
+		// Re-enter acquire with empty pool path for direct node via temporary allow.
+		lease, configured, err := m.acquireDirect(ctx, scope, affinity, credentialCookies)
+		if err != nil {
+			return nil, configured, false, fallbackError(primaryErr, fmt.Errorf("获取本地直连回退: %w", err))
+		}
+		return lease, configured, true, nil
+	case domain.FallbackModeFixed:
+		selected, err := m.fixedFallbackNode(ctx, scope, fallback.NodeID)
+		if err != nil {
+			return nil, false, false, fallbackError(primaryErr, err)
+		}
+		// Build lease using the same path as primary selection for this node.
+		return m.leaseFromSelectedNode(ctx, scope, affinity, selected, credentialCookies, true)
+	default:
+		return nil, false, false, fallbackError(primaryErr, fmt.Errorf("出口回退模式 %q 无效", fallback.Mode))
+	}
+}
+
+func (m *Manager) acquireDirect(ctx context.Context, scope domain.Scope, affinity, credentialCookies string) (*Lease, bool, error) {
+	selected := domain.Node{ID: 0, Name: "direct", Scope: scope, Enabled: true, Health: 1}
+	lease, configured, _, err := m.leaseFromSelectedNode(ctx, scope, affinity, selected, credentialCookies, false)
+	return lease, configured, err
+}
+
+func (m *Manager) loadOperationsConfig(ctx context.Context, now time.Time) (domain.OperationsConfig, bool, error) {
+	configRepository, ok := m.repository.(operationsConfigRepository)
+	if !ok {
+		return domain.OperationsConfig{}, false, nil
+	}
+	m.operationsMu.RLock()
+	cached := m.operationsConfig
+	m.operationsMu.RUnlock()
+	if !cached.expiresAt.IsZero() && now.Before(cached.expiresAt) {
+		return cached.value, true, nil
+	}
+	loaded, err, _ := m.operationsConfigLoad.Do("operations", func() (any, error) {
+		checkTime := time.Now().UTC()
+		m.operationsMu.RLock()
+		cached := m.operationsConfig
+		m.operationsMu.RUnlock()
+		if !cached.expiresAt.IsZero() && checkTime.Before(cached.expiresAt) {
+			return cached.value, nil
+		}
+		m.operationsMu.RLock()
+		version := m.operationsConfigVer
+		m.operationsMu.RUnlock()
+		value, err := configRepository.GetEgressOperationsConfig(ctx)
+		if err != nil {
+			return domain.OperationsConfig{}, err
+		}
+		m.operationsMu.Lock()
+		if version == m.operationsConfigVer {
+			m.operationsConfig = cachedOperationsConfig{value: value, expiresAt: checkTime.Add(operationsConfigSnapshotTTL)}
+		}
+		m.operationsMu.Unlock()
+		return value, nil
+	})
+	if err != nil {
+		return domain.OperationsConfig{}, true, err
+	}
+	return loaded.(domain.OperationsConfig), true, nil
+}
+
+func (m *Manager) fixedFallbackNode(ctx context.Context, scope domain.Scope, nodeID uint64) (domain.Node, error) {
+	if nodeID == 0 {
+		return domain.Node{}, errors.New("固定回退节点未指定")
+	}
+	selected, err := m.repository.GetEgressNode(ctx, nodeID)
+	if err != nil {
+		return domain.Node{}, fmt.Errorf("读取固定回退节点 %d: %w", nodeID, err)
+	}
+	if !selected.MatchesScope(scope) && !domain.SupportsScope(selected.Scope, scope) {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 与 %s 作用域不兼容", nodeID, scope)
+	}
+	if !selected.Enabled {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 已禁用", nodeID)
+	}
+	if strings.TrimSpace(selected.EncryptedProxyURL) == "" {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 未配置代理地址", nodeID)
+	}
+	if selected.CooldownUntil != nil && time.Now().UTC().Before(*selected.CooldownUntil) {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 正在冷却", nodeID)
+	}
+	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
+	if err != nil {
+		return domain.Node{}, fmt.Errorf("读取固定回退节点 %d 代理配置: %w", nodeID, err)
+	}
+	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	if err != nil || proxyURL == "" {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 代理地址无效", nodeID)
+	}
+	if strings.Contains(proxyURL, application.ProxyAccountPlaceholder) {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 使用账号代理模板", nodeID)
+	}
+	return selected, nil
+}
+
+func fallbackError(primaryErr, fallbackErr error) error {
+	if primaryErr == nil {
+		return fallbackErr
+	}
+	return fmt.Errorf("%w；出口回退不可用: %v", primaryErr, fallbackErr)
+}
+
+// leaseFromSelectedNode builds a lease for an already-chosen node (primary or fallback).
+func (m *Manager) leaseFromSelectedNode(ctx context.Context, scope domain.Scope, affinity string, selected domain.Node, credentialCookies string, configured bool) (*Lease, bool, bool, error) {
+	proxyURL, err := m.cipher.Decrypt(selected.EncryptedProxyURL)
+	if err != nil {
+		return nil, configured, false, err
+	}
+	proxyURL, err = application.NormalizeProxyURL(proxyURL)
+	if err != nil {
+		return nil, configured, false, err
+	}
+	sticky := strings.Contains(proxyURL, application.ProxyAccountPlaceholder)
+	if sticky {
+		accountKey := accountFromContext(ctx)
+		if accountKey == "" && strings.TrimSpace(affinity) != "" {
+			accountKey = string(scope) + "_" + strings.TrimSpace(affinity)
+		}
+		proxyURL, err = renderAccountProxyURL(proxyURL, accountKey)
+		if err != nil {
+			return nil, configured, false, err
+		}
+	}
+	cookies := ""
+	if scope != domain.ScopeBuild {
+		cookies, err = m.cipher.Decrypt(selected.EncryptedCloudflareCookie)
+		if err != nil {
+			return nil, configured, false, err
+		}
+		if cookies == "" {
+			cookies = credentialCookies
+		}
+	}
+	userAgent := strings.TrimSpace(selected.UserAgent)
+	if userAgent == "" {
+		userAgent = DefaultUserAgent
+	}
+	client, err := m.clientFor(selected.ID, scope, proxyURL, userAgent, cookies, sticky)
+	if err != nil {
+		return nil, configured, false, err
+	}
+	recordSelection(ctx, Selection{NodeID: selected.ID, NodeName: selected.Name, Scope: scope, Proxied: proxyURL != ""})
+	m.mu.Lock()
+	m.inflight[selected.ID]++
+	m.mu.Unlock()
+	return &Lease{
+		NodeID: selected.ID, NodeName: selected.Name, Scope: scope, ProxyURL: proxyURL,
+		UserAgent: userAgent, CFCookies: cookies, client: client.client, browser: client.browser, sticky: sticky,
+		release: func() {
+			m.mu.Lock()
+			if m.inflight[selected.ID] > 0 {
+				m.inflight[selected.ID]--
+			}
+			m.mu.Unlock()
+		},
+	}, configured, true, nil
 }
 
 func (m *Manager) listNodes(ctx context.Context, scope domain.Scope, now time.Time) ([]domain.Node, error) {

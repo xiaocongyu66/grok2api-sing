@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
@@ -16,6 +17,11 @@ type RateLimiter interface {
 type ConcurrencyLimiter interface {
 	Acquire(ctx context.Context, key string, limit int) (release func(), acquired bool, err error)
 	Current(ctx context.Context, key string) (int, error)
+}
+
+// AccountConcurrencyKey 返回账号推理租约使用的统一运行态键。
+func AccountConcurrencyKey(accountID uint64) string {
+	return "account:" + strconv.FormatUint(accountID, 10)
 }
 
 // ConcurrencySnapshotReader 批量读取并发租约快照；调度器会优先使用它减少远程运行态往返。

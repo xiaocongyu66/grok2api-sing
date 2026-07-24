@@ -266,6 +266,14 @@ type RoutingConfig struct {
 	// DeprioritizeFailedAccounts ranks accounts with higher failure_count last for
 	// request routing and slow quota-sync queues. Switchable; default true.
 	DeprioritizeFailedAccounts bool `yaml:"deprioritizeFailedAccounts"`
+	// PreferFreeBuild prefers known free Build accounts when scoring (optional).
+	PreferFreeBuild bool `yaml:"preferFreeBuild"`
+	// SegmentedSelectorEnabled enables windowed large-pool selection for high concurrency.
+	SegmentedSelectorEnabled bool `yaml:"segmentedSelectorEnabled"`
+	// SegmentedMinCandidates is the pool size threshold before segmented mode activates.
+	SegmentedMinCandidates int `yaml:"segmentedSelectorMinCandidates"`
+	// SegmentedWindowSize is how many candidates each segmented window evaluates.
+	SegmentedWindowSize int `yaml:"segmentedSelectorWindowSize"`
 	// PromptCacheAffinity stabilizes x-grok-conv-id for upstream prompt-cache hits.
 	PromptCacheAffinity PromptCacheAffinityConfig `yaml:"promptCacheAffinity"`
 	// ReasoningReplay holds previous-turn encrypted reasoning for multi-turn Build
@@ -661,6 +669,11 @@ func (c Config) Validate() error {
 	if c.Routing.StickyTTL.Value() <= 0 || c.Routing.StickyTTL.Value() > maxRoutingTTL || c.Routing.CooldownBase.Value() <= 0 || c.Routing.CooldownMax.Value() < c.Routing.CooldownBase.Value() || c.Routing.CooldownMax.Value() > maxRoutingCooldown || c.Routing.CapacityWait.Value() <= 0 || c.Routing.CapacityWait.Value() > 5*time.Second || c.Routing.MaxAttempts < 1 || c.Routing.MaxAttempts > 10 {
 		return fmt.Errorf("routing 参数无效")
 	}
+	if c.Routing.SegmentedMinCandidates < 100 || c.Routing.SegmentedMinCandidates > 1000000 ||
+		c.Routing.SegmentedWindowSize < 8 || c.Routing.SegmentedWindowSize > 256 ||
+		c.Routing.SegmentedWindowSize > c.Routing.SegmentedMinCandidates {
+		return errors.New("routing.segmentedSelector 参数不合法（minCandidates 100..1e6，windowSize 8..256 且不超过 minCandidates）")
+	}
 	if c.Routing.PromptCacheAffinity.TTL.Value() < 0 || c.Routing.PromptCacheAffinity.TTL.Value() > 30*24*time.Hour {
 		return errors.New("routing 配置无效")
 	}
@@ -802,6 +815,10 @@ func defaultConfig() Config {
 			RetryStatusCodes:           append([]int(nil), DefaultRetryStatusCodes...),
 			RetryServerErrors:          true,
 			DeprioritizeFailedAccounts: true,
+		PreferFreeBuild:            false,
+		SegmentedSelectorEnabled:   false,
+		SegmentedMinCandidates:     3000,
+		SegmentedWindowSize:        64,
 			PromptCacheAffinity: PromptCacheAffinityConfig{
 				Enabled:     true,
 				Fingerprint: true,

@@ -351,6 +351,129 @@ func (r *AccountRepository) ListRoutingCandidates(ctx context.Context, provider 
 	return result, nil
 }
 
+func (r *AccountRepository) ListRoutingAccountBases(ctx context.Context, provider account.Provider, quotaMode string) ([]account.RoutingAccountBase, error) {
+	values, err := r.ListEnabled(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uint64, 0, len(values))
+	for _, value := range values {
+		ids = append(ids, value.ID)
+	}
+	billings, err := r.GetBillings(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	recoveries, err := r.GetQuotaRecoveries(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	quotaWindows := make(map[uint64]account.QuotaWindow, len(ids))
+	if len(ids) > 0 && (provider == account.ProviderWeb || quotaMode != "") {
+		modes := make([]string, 0, 2)
+		if provider == account.ProviderWeb {
+			modes = append(modes, "weekly")
+		}
+		if quotaMode != "" {
+			modes = append(modes, quotaMode)
+		}
+		var rows []quotaWindowModel
+		if err := r.db.db.WithContext(ctx).Where("account_id IN ? AND mode IN ?", ids, modes).Order("CASE WHEN mode = 'weekly' THEN 0 ELSE 1 END").Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if _, exists := quotaWindows[row.AccountID]; !exists {
+				quotaWindows[row.AccountID] = toQuotaWindowDomain(row)
+			}
+		}
+	}
+	result := make([]account.RoutingAccountBase, 0, len(values))
+	for _, value := range values {
+		base := account.RoutingAccountBase{Credential: value}
+		if billing, ok := billings[value.ID]; ok {
+			base.Billing = &billing
+		}
+		if recovery, ok := recoveries[value.ID]; ok {
+			base.QuotaRecovery = &recovery
+		}
+		if window, ok := quotaWindows[value.ID]; ok {
+			base.QuotaWindow = &window
+		}
+		result = append(result, base)
+	}
+	return result, nil
+}
+
+func (r *AccountRepository) ListRoutingAccountOverlays(ctx context.Context, provider account.Provider, upstreamModel string) (account.RoutingOverlaySnapshot, error) {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" {
+		return account.RoutingOverlaySnapshot{}, nil
+	}
+	var boundIDs []uint64
+	if err := r.db.db.WithContext(ctx).
+		Table("model_route_accounts AS binding").
+		Select("binding.account_id").
+		Joins("JOIN model_routes AS route ON route.id = binding.model_route_id").
+		Where("route.provider = ? AND route.upstream_model = ?", provider, upstreamModel).
+		Scan(&boundIDs).Error; err != nil {
+		return account.RoutingOverlaySnapshot{}, err
+	}
+	values := make(map[uint64]account.RoutingAccountOverlay)
+	for _, id := range boundIDs {
+		values[id] = account.RoutingAccountOverlay{AccountID: id, Bound: true, ModelCapabilityKnown: true, SupportsModel: true}
+	}
+	var states []accountModelSyncStateModel
+	if err := r.db.db.WithContext(ctx).
+		Table("account_model_sync_states AS state").
+		Select("state.*").
+		Joins("JOIN provider_accounts AS account ON account.id = state.account_id").
+		Where("account.provider = ? AND account.enabled = TRUE AND state.last_success_at IS NOT NULL", provider).
+		Find(&states).Error; err != nil {
+		return account.RoutingOverlaySnapshot{}, err
+	}
+	for _, state := range states {
+		overlay := values[state.AccountID]
+		overlay.AccountID = state.AccountID
+		overlay.ModelCapabilityKnown = true
+		values[state.AccountID] = overlay
+	}
+	var capabilities []accountModelCapabilityModel
+	if err := r.db.db.WithContext(ctx).
+		Table("account_model_capabilities AS capability").
+		Select("capability.*").
+		Joins("JOIN provider_accounts AS account ON account.id = capability.account_id").
+		Where("account.provider = ? AND account.enabled = TRUE AND capability.upstream_model = ?", provider, upstreamModel).
+		Find(&capabilities).Error; err != nil {
+		return account.RoutingOverlaySnapshot{}, err
+	}
+	for _, capability := range capabilities {
+		overlay := values[capability.AccountID]
+		overlay.AccountID = capability.AccountID
+		overlay.SupportsModel = true
+		values[capability.AccountID] = overlay
+	}
+	var blockRows []accountModelQuotaBlockModel
+	if err := r.db.db.WithContext(ctx).
+		Table("account_model_quota_blocks AS block").
+		Select("block.*").
+		Joins("JOIN provider_accounts AS account ON account.id = block.account_id").
+		Where("account.provider = ? AND account.enabled = TRUE AND block.upstream_model = ? AND block.cooldown_until > ?", provider, upstreamModel, time.Now().UTC()).
+		Find(&blockRows).Error; err != nil {
+		return account.RoutingOverlaySnapshot{}, err
+	}
+	for _, row := range blockRows {
+		overlay := values[row.AccountID]
+		overlay.AccountID = row.AccountID
+		overlay.ModelQuotaBlock = &account.ModelQuotaBlock{AccountID: row.AccountID, UpstreamModel: row.UpstreamModel, Reason: row.Reason, CooldownUntil: row.CooldownUntil.UTC(), UpdatedAt: row.UpdatedAt.UTC()}
+		values[row.AccountID] = overlay
+	}
+	result := account.RoutingOverlaySnapshot{HasBindings: len(boundIDs) > 0, Values: make([]account.RoutingAccountOverlay, 0, len(values))}
+	for _, value := range values {
+		result.Values = append(result.Values, value)
+	}
+	return result, nil
+}
+
 func (r *AccountRepository) ListEnabled(ctx context.Context, provider account.Provider) ([]account.Credential, error) {
 	var rows []accountModel
 	// Prefer healthy accounts first so bulk sync / routing snapshots hit good tokens before

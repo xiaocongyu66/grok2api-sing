@@ -3,6 +3,7 @@ package account
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"strings"
 	"time"
 )
 
@@ -275,6 +276,47 @@ type RoutingCandidate struct {
 	ModelQuotaBlock      *ModelQuotaBlock
 	ModelCapabilityKnown bool
 	SupportsModel        bool
+}
+
+// RoutingAccountBase contains provider-level routing state reusable across models.
+type RoutingAccountBase struct {
+	Credential    Credential
+	Billing       *Billing
+	QuotaRecovery *QuotaRecovery
+	QuotaWindow   *QuotaWindow
+}
+
+// RoutingAccountOverlay contains model-specific eligibility state.
+type RoutingAccountOverlay struct {
+	AccountID            uint64
+	Bound                bool
+	ModelCapabilityKnown bool
+	SupportsModel        bool
+	ModelQuotaBlock      *ModelQuotaBlock
+}
+
+// RoutingOverlaySnapshot is the model-scoped overlay for layered candidate assembly.
+type RoutingOverlaySnapshot struct {
+	HasBindings bool
+	Values      []RoutingAccountOverlay
+}
+
+// IsKnownFreeBuild reports whether this candidate is a confirmed Grok Build free account.
+// Super entitlement / paid billing wins so free signals cannot demote Super accounts.
+func (c RoutingCandidate) IsKnownFreeBuild() bool {
+	if c.Credential.Provider != ProviderBuild {
+		return false
+	}
+	if c.Billing != nil && c.Billing.IsPaid() {
+		return false
+	}
+	if c.QuotaRecovery != nil && c.QuotaRecovery.Kind == QuotaRecoveryKindFree {
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(c.Credential.ObservedModel)), "-build-free") {
+		return true
+	}
+	return c.Billing != nil && !c.Billing.IsPaid()
 }
 
 // ModelQuotaBlock 表示账号的单模型配额暂不可用，不影响该账号上的其他模型。

@@ -1,12 +1,15 @@
 package relational
 
 import (
-	"strings"
-	"fmt"
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type EgressRepository struct{ db *Database }
@@ -185,3 +188,53 @@ func validateEgressNode(value egress.Node) error {
 	return nil
 }
 
+
+func (r *EgressRepository) GetEgressOperationsConfig(ctx context.Context) (egress.OperationsConfig, error) {
+	var row egressOperationsConfigModel
+	if err := r.db.db.WithContext(ctx).First(&row, 1).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return egress.DefaultOperationsConfig(), nil
+		}
+		return egress.OperationsConfig{}, mapError(err)
+	}
+	return toEgressOperationsConfigDomain(row), nil
+}
+
+func (r *EgressRepository) SaveEgressOperationsConfig(ctx context.Context, value egress.OperationsConfig) (egress.OperationsConfig, error) {
+	row := fromEgressOperationsConfigDomain(value)
+	row.ID = 1
+	if err := r.db.db.WithContext(ctx).Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
+		return egress.OperationsConfig{}, mapError(err)
+	}
+	return toEgressOperationsConfigDomain(row), nil
+}
+
+func toEgressOperationsConfigDomain(row egressOperationsConfigModel) egress.OperationsConfig {
+	return egress.OperationsConfig{
+		ProbeIntervalSeconds: row.ProbeIntervalSeconds, AutoAssignEnabled: row.AutoAssignEnabled, AutoBalanceEnabled: row.AutoBalanceEnabled,
+		AssignmentIntervalSeconds: row.AssignmentIntervalSeconds,
+		Fallbacks: map[egress.Scope]egress.FallbackConfig{
+			egress.ScopeBuild:    {Mode: egress.FallbackMode(row.BuildFallbackMode).Normalized(), NodeID: row.BuildFallbackNodeID},
+			egress.ScopeWeb:      {Mode: egress.FallbackMode(row.WebFallbackMode).Normalized(), NodeID: row.WebFallbackNodeID},
+			egress.ScopeConsole:  {Mode: egress.FallbackMode(row.ConsoleFallbackMode).Normalized(), NodeID: row.ConsoleFallbackNodeID},
+			egress.ScopeWebAsset: {Mode: egress.FallbackMode(row.WebAssetFallbackMode).Normalized(), NodeID: row.WebAssetFallbackNodeID},
+		},
+		UpdatedAt: row.UpdatedAt,
+	}
+}
+
+func fromEgressOperationsConfigDomain(value egress.OperationsConfig) egressOperationsConfigModel {
+	buildFallback := value.FallbackFor(egress.ScopeBuild)
+	webFallback := value.FallbackFor(egress.ScopeWeb)
+	consoleFallback := value.FallbackFor(egress.ScopeConsole)
+	webAssetFallback := value.FallbackFor(egress.ScopeWebAsset)
+	return egressOperationsConfigModel{
+		ID: 1, ProbeIntervalSeconds: value.ProbeIntervalSeconds, AutoAssignEnabled: value.AutoAssignEnabled,
+		AutoBalanceEnabled: value.AutoBalanceEnabled, AssignmentIntervalSeconds: value.AssignmentIntervalSeconds,
+		BuildFallbackMode: string(buildFallback.Mode), BuildFallbackNodeID: buildFallback.NodeID,
+		WebFallbackMode: string(webFallback.Mode), WebFallbackNodeID: webFallback.NodeID,
+		ConsoleFallbackMode: string(consoleFallback.Mode), ConsoleFallbackNodeID: consoleFallback.NodeID,
+		WebAssetFallbackMode: string(webAssetFallback.Mode), WebAssetFallbackNodeID: webAssetFallback.NodeID,
+		UpdatedAt: value.UpdatedAt,
+	}
+}

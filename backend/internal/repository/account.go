@@ -48,6 +48,10 @@ type AccountRepository interface {
 	ListMissingConsoleSyncBatch(ctx context.Context, afterID uint64, limit int) ([]account.Credential, int64, int64, error)
 	HasActive(ctx context.Context, provider account.Provider) (bool, error)
 	ListRoutingCandidates(ctx context.Context, provider account.Provider, upstreamModel, quotaMode string) ([]account.RoutingCandidate, error)
+	// ListRoutingAccountBases returns provider-level state reusable across models (layered selector).
+	ListRoutingAccountBases(ctx context.Context, provider account.Provider, quotaMode string) ([]account.RoutingAccountBase, error)
+	// ListRoutingAccountOverlays returns model-specific eligibility for layered selector assembly.
+	ListRoutingAccountOverlays(ctx context.Context, provider account.Provider, upstreamModel string) (account.RoutingOverlaySnapshot, error)
 	Get(ctx context.Context, id uint64) (account.Credential, error)
 	GetMany(ctx context.Context, ids []uint64) ([]account.Credential, error)
 	LinkWebToBuild(ctx context.Context, webAccountID, buildAccountID uint64) error

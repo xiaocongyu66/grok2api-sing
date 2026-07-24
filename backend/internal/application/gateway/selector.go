@@ -17,12 +17,13 @@ import (
 )
 
 type accountLease struct {
-	Credential     account.Credential
-	Billing        *account.Billing
-	QuotaProbe     bool
-	QuotaProbeKind account.QuotaRecoveryKind
-	QuotaMode      string
-	release        func()
+	Credential          account.Credential
+	Billing             *account.Billing
+	QuotaProbe          bool
+	QuotaProbeKind      account.QuotaRecoveryKind
+	QuotaMode           string
+	selectorObservation *selectorLeaseObservation
+	release             func()
 }
 
 const quotaProbeLease = 5 * time.Minute
@@ -82,9 +83,27 @@ func (e *SelectionUnavailableError) Error() string {
 }
 
 func (l *accountLease) Release() {
-	if l != nil && l.release != nil {
+	if l == nil {
+		return
+	}
+	if l.selectorObservation != nil {
+		l.selectorObservation.completeRelease()
+	}
+	if l.release != nil {
 		l.release()
 		l.release = nil
+	}
+}
+
+func (l *accountLease) markSelectorUpstreamStarted() {
+	if l != nil && l.selectorObservation != nil {
+		l.selectorObservation.upstreamStarted.Store(true)
+	}
+}
+
+func (l *accountLease) completeSelectorObservation(success bool) {
+	if l != nil && l.selectorObservation != nil {
+		l.selectorObservation.complete(success)
 	}
 }
 
@@ -99,6 +118,10 @@ type Selector struct {
 	cooldownMax                time.Duration
 	capacityWait               time.Duration
 	deprioritizeFailedAccounts bool
+	preferFreeBuild            bool
+	segmentedConfig            segmentedSelectorConfig
+	segmentedState             segmentedSelectorState
+	configMu                   sync.RWMutex
 	mu                         sync.Mutex
 	leaseWakeMu                sync.Mutex
 	leaseWake                  chan struct{}
@@ -122,6 +145,7 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 		accounts: accounts, concurrency: concurrency, sticky: sticky, logger: slog.Default(),
 		tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax,
 		capacityWait: wait, deprioritizeFailedAccounts: true,
+		segmentedConfig: normalizeSegmentedSelectorConfig(segmentedSelectorConfig{}),
 		leaseWake: make(chan struct{}), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time),
 		candidates: make(map[candidateCacheKey]candidateSnapshot),
 	}
@@ -166,6 +190,28 @@ func (s *Selector) SetDeprioritizeFailedAccounts(enabled bool) {
 	s.mu.Unlock()
 }
 
+// UpdatePreferFreeBuild toggles preferring known free Build accounts when scoring.
+func (s *Selector) UpdatePreferFreeBuild(value bool) {
+	if s == nil {
+		return
+	}
+	s.configMu.Lock()
+	s.preferFreeBuild = value
+	s.configMu.Unlock()
+}
+
+// UpdateSegmentedSelector configures large-pool windowed selection (disabled by default).
+func (s *Selector) UpdateSegmentedSelector(enabled bool, minCandidates, windowSize int) {
+	if s == nil {
+		return
+	}
+	s.configMu.Lock()
+	s.segmentedConfig = normalizeSegmentedSelectorConfig(segmentedSelectorConfig{
+		enabled: enabled, minCandidates: minCandidates, windowSize: windowSize,
+	})
+	s.configMu.Unlock()
+}
+
 func (s *Selector) routingConfig() (time.Duration, time.Duration, time.Duration, time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,6 +227,35 @@ func (s *Selector) deprioritizeFailed() bool {
 	return s.deprioritizeFailedAccounts
 }
 
+func (s *Selector) preferFreeBuildEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.preferFreeBuild
+}
+
+func routingCandidateByID(values []account.RoutingCandidate, indexes []int, accountID uint64) (account.RoutingCandidate, bool) {
+	if indexes == nil {
+		for _, candidate := range values {
+			if candidate.Credential.ID == accountID {
+				return candidate, true
+			}
+		}
+		return account.RoutingCandidate{}, false
+	}
+	for _, index := range indexes {
+		if index < 0 || index >= len(values) {
+			continue
+		}
+		if values[index].Credential.ID == accountID {
+			return values[index], true
+		}
+	}
+	return account.RoutingCandidate{}, false
+}
+
 func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
 	now := time.Now().UTC()
 	stickyKey := stickySessionKey(affinityKey)
@@ -188,17 +263,16 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	if err != nil {
 		return nil, err
 	}
-	normalCandidates := make([]account.RoutingCandidate, 0, len(values))
-	// normalByID enables O(1) sticky pin after the filter pass (large account pools).
-	normalByID := make(map[uint64]account.RoutingCandidate, len(values))
-	probeCandidates := make([]account.RoutingCandidate, 0, len(values))
+	// Index-only pools avoid copying full credential/billing structs per request.
+	normalCandidates := make([]int, 0, len(values))
+	probeCandidates := make([]int, 0, len(values))
 	supportedCandidates := 0
 	consideredCandidates := 0
 	coolingCandidates := 0
 	modelCoolingCandidates := 0
 	quotaCandidates := 0
 	var earliestRetry time.Time
-	for _, candidate := range values {
+	for index, candidate := range values {
 		value := candidate.Credential
 		if excluded[value.ID] || value.AuthStatus != account.AuthStatusActive {
 			continue
@@ -221,7 +295,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		quotaRecovery := candidate.QuotaRecovery
 		if quotaRecovery != nil && quotaRecovery.Status != account.QuotaRecoveryStatusActive {
 			if allowQuotaProbe && quotaRecovery.NextProbeAt != nil && !now.Before(*quotaRecovery.NextProbeAt) {
-				probeCandidates = append(probeCandidates, candidate)
+				probeCandidates = append(probeCandidates, index)
 			} else {
 				quotaCandidates++
 				if quotaRecovery.NextProbeAt != nil {
@@ -241,8 +315,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			}
 			continue
 		}
-		normalCandidates = append(normalCandidates, candidate)
-		normalByID[value.ID] = candidate
+		normalCandidates = append(normalCandidates, index)
 	}
 	if len(normalCandidates) == 0 && len(probeCandidates) == 0 {
 		reason := SelectionNoAccounts
@@ -259,7 +332,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		return nil, &SelectionUnavailableError{Reason: reason, RetryAfter: retryDelay(now, earliestRetry)}
 	}
 	if len(probeCandidates) > 0 {
-		plan, err := s.planCandidates(ctx, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel))
+		plan, err := s.planCandidateIndexes(ctx, values, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel))
 		if err != nil {
 			return nil, err
 		}
@@ -292,7 +365,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 			return nil, fmt.Errorf("读取会话粘滞状态: %w", err)
 		}
 		if ok {
-			candidate, found := normalByID[stickyID]
+			candidate, found := routingCandidateByID(values, normalCandidates, stickyID)
 			if found {
 				// Refresh/claim sticky binding atomically so concurrent turns cannot thrash accounts.
 				stickyTTL, _, _, _ := s.routingConfig()
@@ -301,7 +374,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 					return nil, fmt.Errorf("刷新会话粘滞状态: %w", bindErr)
 				}
 				if boundID != stickyID {
-					if rebound, ok := normalByID[boundID]; ok {
+					if rebound, ok := routingCandidateByID(values, normalCandidates, boundID); ok {
 						candidate = rebound
 						stickyID = boundID
 					}
@@ -338,7 +411,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	// Sticky account only concurrency-saturated: borrow another account for this request
 	// without overwriting the sticky binding (upstream sticky optimize).
 	if saturatedStickyID != 0 {
-		plan, err := s.planCandidates(ctx, normalCandidates, time.Now().UTC(), s.resolveTierOrder(provider, upstreamModel))
+		plan, err := s.planCandidateIndexes(ctx, values, normalCandidates, time.Now().UTC(), s.resolveTierOrder(provider, upstreamModel))
 		if err != nil {
 			return nil, err
 		}
@@ -364,12 +437,19 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		}
 		return nil, &SelectionUnavailableError{Reason: SelectionSaturated, RetryAfter: time.Second}
 	}
+	// Large pools: windowed cohort selection when sticky is not required.
+	if stickyKey == "" {
+		activeRequest := s.nextSegmentedActiveRequest(provider, upstreamModel, quotaMode, len(normalCandidates))
+		if activeRequest != nil {
+			return s.acquireSegmentedCandidates(ctx, values, normalCandidates, quotaMode, s.resolveTierOrder(provider, upstreamModel), *activeRequest)
+		}
+	}
 	_, _, _, capacityWait := s.routingConfig()
 	waitDeadline := time.Now().Add(capacityWait)
 	waitRounds := 0
 	for {
 		currentTime := time.Now().UTC()
-		plan, err := s.planCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel))
+		plan, err := s.planCandidateIndexes(ctx, values, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel))
 		if err != nil {
 			return nil, err
 		}
@@ -410,7 +490,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 					return nil, fmt.Errorf("写入会话粘滞状态: %w", bindErr)
 				}
 				if boundID != candidate.Credential.ID {
-					if boundCandidate, eligible := normalByID[boundID]; eligible {
+					if boundCandidate, eligible := routingCandidateByID(values, normalCandidates, boundID); eligible {
 						boundLease, boundErr := s.acquirePinnedCapacity(ctx, boundCandidate.Credential)
 						if boundErr == nil && boundLease != nil {
 							lease.Release()

@@ -12,4 +12,6 @@ type EgressRepository interface {
 	CreateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error)
 	UpdateEgressNode(ctx context.Context, value egress.Node) (egress.Node, error)
 	DeleteEgressNode(ctx context.Context, id uint64) error
+	GetEgressOperationsConfig(ctx context.Context) (egress.OperationsConfig, error)
+	SaveEgressOperationsConfig(ctx context.Context, value egress.OperationsConfig) (egress.OperationsConfig, error)
 }
