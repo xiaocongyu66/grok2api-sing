@@ -58,31 +58,12 @@ func marshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
 }
 
 func parseImportedCredentials(data []byte) ([]provider.CredentialSeed, error) {
-	var shape map[string]json.RawMessage
-	if err := json.Unmarshal(data, &shape); err != nil {
+	entries, err := provider.DecodeCredentialJSONEntries[importedCredentialEntry](data, credentialImportProvider, maxCredentialImportAccounts)
+	if err != nil {
 		return nil, fmt.Errorf("解析账号凭据 JSON: %w", err)
 	}
-
-	var entries []importedCredentialEntry
-	if _, batch := shape["accounts"]; batch {
-		var document credentialImportDocument
-		if err := json.Unmarshal(data, &document); err != nil {
-			return nil, fmt.Errorf("解析批量账号凭据: %w", err)
-		}
-		entries = document.Accounts
-	} else {
-		var entry importedCredentialEntry
-		if err := json.Unmarshal(data, &entry); err != nil {
-			return nil, fmt.Errorf("解析 OAuth 凭据: %w", err)
-		}
-		entries = []importedCredentialEntry{entry}
-	}
-
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("账号凭据中没有账号")
-	}
-	if len(entries) > maxCredentialImportAccounts {
-		return nil, fmt.Errorf("%w: 单次最多导入 %d 个账号", provider.ErrCredentialLimit, maxCredentialImportAccounts)
 	}
 
 	result := make([]provider.CredentialSeed, 0, len(entries))

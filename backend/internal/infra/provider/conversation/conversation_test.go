@@ -426,6 +426,19 @@ func TestConvertResponsesJSONToChatAndMessages(t *testing.T) {
 	if messagesUsage["cost_in_usd_ticks"] != float64(158500) || messagesUsage["num_server_side_tools_used"] != float64(2) || messagesUsage["context_details"].(map[string]any)["output_tokens"] != float64(4) {
 		t.Fatalf("messages usage = %#v", messagesUsage)
 	}
+	if messagesUsage["input_tokens"] != float64(8) || messagesUsage["cache_read_input_tokens"] != float64(2) {
+		t.Fatalf("messages cache usage = %#v", messagesUsage)
+	}
+}
+
+func TestAnthropicUsageClampsCacheReadToTotalInput(t *testing.T) {
+	usage := responseUsage{InputTokens: 10, OutputTokens: 2}
+	usage.InputTokensDetails.CachedTokens = 12
+
+	converted := anthropicUsage(usage, 0)
+	if converted["input_tokens"] != int64(0) || converted["cache_read_input_tokens"] != int64(10) {
+		t.Fatalf("clamped messages usage = %#v", converted)
+	}
 }
 
 func TestConvertResponsesJSONToMessagesThinkingAndStop(t *testing.T) {

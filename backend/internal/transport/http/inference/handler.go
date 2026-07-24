@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"strconv"
@@ -1066,20 +1067,28 @@ type responsePayloadDTO struct {
 }
 
 type responseUsageDTO struct {
-	InputTokens            int64                     `json:"input_tokens"`
-	InputTokensCamel       int64                     `json:"inputTokens"`
-	OutputTokens           int64                     `json:"output_tokens"`
-	OutputTokensCamel      int64                     `json:"outputTokens"`
-	TotalTokens            int64                     `json:"total_tokens"`
-	TotalTokensCamel       int64                     `json:"totalTokens"`
-	CostInUSDTicks         int64                     `json:"cost_in_usd_ticks"`
-	NumSourcesUsed         int64                     `json:"num_sources_used"`
-	NumServerSideToolsUsed int64                     `json:"num_server_side_tools_used"`
-	InputTokensDetails     responseInputDetailsDTO   `json:"input_tokens_details"`
-	OutputTokensDetails    responseOutputDetailsDTO  `json:"output_tokens_details"`
-	ContextDetails         responseContextDetailsDTO `json:"context_details"`
-	PromptTokens           int64                     `json:"prompt_tokens"`
-	CompletionTokens       int64                     `json:"completion_tokens"`
+	InputTokens            int64 `json:"input_tokens"`
+	InputTokensCamel       int64 `json:"inputTokens"`
+	OutputTokens           int64 `json:"output_tokens"`
+	OutputTokensCamel      int64 `json:"outputTokens"`
+	TotalTokens            int64 `json:"total_tokens"`
+	TotalTokensCamel       int64 `json:"totalTokens"`
+	CostInUSDTicks         int64 `json:"cost_in_usd_ticks"`
+	NumSourcesUsed         int64 `json:"num_sources_used"`
+	NumServerSideToolsUsed int64 `json:"num_server_side_tools_used"`
+	// Responses protocol: input_tokens_details.cached_tokens
+	InputTokensDetails responseInputDetailsDTO `json:"input_tokens_details"`
+	// OpenAI Chat Completions protocol: prompt_tokens_details.cached_tokens
+	PromptTokensDetails responseInputDetailsDTO `json:"prompt_tokens_details"`
+	// Anthropic Messages protocol: top-level cache_read_input_tokens
+	CacheReadInputTokens     int64                    `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64                    `json:"cache_creation_input_tokens"`
+	OutputTokensDetails      responseOutputDetailsDTO `json:"output_tokens_details"`
+	// OpenAI Chat Completions protocol: completion_tokens_details.reasoning_tokens
+	CompletionTokensDetails responseOutputDetailsDTO  `json:"completion_tokens_details"`
+	ContextDetails          responseContextDetailsDTO `json:"context_details"`
+	PromptTokens            int64                     `json:"prompt_tokens"`
+	CompletionTokens        int64                     `json:"completion_tokens"`
 }
 
 type responseInputDetailsDTO struct {
@@ -1117,14 +1126,46 @@ func (value responseUsageDTO) toGatewayUsage(responseModel string) gateway.Usage
 	if total == 0 {
 		total = input + output
 	}
+	// Unified cache hits: Responses / Chat Completions / Anthropic Messages
+	cached := value.InputTokensDetails.CachedTokens
+	if cached == 0 {
+		cached = value.PromptTokensDetails.CachedTokens
+	}
+	if cached == 0 {
+		cached = value.CacheReadInputTokens
+	}
+	// Anthropic reports uncached input separately from cache_read/cache_creation.
+	// Reconstruct total input for billing/audit when those fields are present.
+	if value.CacheReadInputTokens > 0 || value.CacheCreationInputTokens > 0 {
+		input = saturatingUsageSum(input, value.CacheReadInputTokens, value.CacheCreationInputTokens)
+		total = saturatingUsageSum(input, output)
+	}
+	reasoning := value.OutputTokensDetails.ReasoningTokens
+	if reasoning == 0 {
+		reasoning = value.CompletionTokensDetails.ReasoningTokens
+	}
 	return gateway.Usage{
-		InputTokens: input, CachedInputTokens: value.InputTokensDetails.CachedTokens,
-		OutputTokens: output, ReasoningTokens: value.OutputTokensDetails.ReasoningTokens,
+		InputTokens: input, CachedInputTokens: cached,
+		OutputTokens: output, ReasoningTokens: reasoning,
 		TotalTokens: total, CostInUSDTicks: value.CostInUSDTicks,
 		NumSourcesUsed: value.NumSourcesUsed, NumServerSideToolsUsed: value.NumServerSideToolsUsed,
 		ContextInputTokens: value.ContextDetails.InputTokens, ContextOutputTokens: value.ContextDetails.OutputTokens,
 		ResponseModel: responseModel,
 	}
+}
+
+func saturatingUsageSum(values ...int64) int64 {
+	var total int64
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if value > math.MaxInt64-total {
+			return math.MaxInt64
+		}
+		total += value
+	}
+	return total
 }
 
 func copyHeaders(destination, source http.Header) {
